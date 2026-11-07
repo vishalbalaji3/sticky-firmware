@@ -854,11 +854,11 @@ void SleepActivity::renderLockScreen() const {
 }
 
 // The panel keeps the last frame when powered down, so this is how the owner tells sleep from awake.
-// Compact: moon and battery on a small white card, for drawing over a kept page.
+// Compact: moon and battery on a small white card over the reader's own bottom-left battery.
 void SleepActivity::drawAsleepMarker(const bool compact) const {
   constexpr int kX = 12;
-  constexpr int kY = 8;
   constexpr int kMoon = 16;
+  const int kY = compact ? renderer.getScreenHeight() - std::max(kMoon, renderer.getLineHeight(SMALL_FONT_ID)) - 8 : 8;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const char* label = compact ? nullptr : tr(STR_SLEEPING);
   const int batteryX = kX + kMoon + (label ? 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10 : 8);
