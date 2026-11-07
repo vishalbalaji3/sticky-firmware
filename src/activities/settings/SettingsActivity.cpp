@@ -145,6 +145,8 @@ void SettingsActivity::rebuildSettings() {
   if (!BoardConfig::isPicco()) {
     addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
   }
+  addAction(SettingsSection::General, StrId::STR_BROWSE_FILES, SettingAction::BrowseFiles);
+  addAction(SettingsSection::General, StrId::STR_FILE_TRANSFER, SettingAction::FileTransfer);
   addAction(SettingsSection::General, StrId::STR_ABOUT, SettingAction::About);
   rebuildRowItems();
 }
@@ -345,6 +347,12 @@ void SettingsActivity::toggleSelectedSetting() {
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
         break;
+      case SettingAction::BrowseFiles:
+        activityManager.goToFileBrowser();
+        return;
+      case SettingAction::FileTransfer:
+        activityManager.goToFileTransfer();
+        return;
       case SettingAction::CheckForUpdates:
         startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);
         break;

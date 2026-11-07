@@ -15,6 +15,9 @@ struct UploadResult {
 // Sends every waiting note. Requires Wi-Fi. A note leaves the queue only after the server confirms it.
 UploadResult uploadQueuedNotes();
 
+// Saves recent transcripts to the card for the Notes app.
+void downloadTranscripts();
+
 // Deletes sent audio past its retention period.
 void pruneSentNotes();
 

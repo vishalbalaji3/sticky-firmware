@@ -27,7 +27,7 @@
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 5;  // File Browser, Library, File transfer, Sync Notes, Settings
+  int count = 5;  // Library, Notes, Remote, Sync Notes, Settings
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -312,17 +312,17 @@ void HomeActivity::loop() {
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
     switch (indexToMenuItem(menuIndex, hasLibrarySlot())) {
-      case HomeMenuItem::FILE_BROWSER:
-        onFileBrowserOpen();
-        break;
       case HomeMenuItem::LIBRARY:
         onLibraryOpen();
         break;
       case HomeMenuItem::OPDS_BROWSER:  // the library slot
         hasPlugins ? onPluginsOpen() : onOpdsBrowserOpen();
         break;
-      case HomeMenuItem::FILE_TRANSFER:
-        onFileTransferOpen();
+      case HomeMenuItem::NOTES:
+        activityManager.goToNotes();
+        break;
+      case HomeMenuItem::REMOTE:
+        activityManager.goToRemote();
         break;
       case HomeMenuItem::SYNC_NOTES:
         activityManager.goToSyncNotes();
@@ -527,13 +527,12 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER), "Sync Notes",
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Transfer, Settings};
+  std::vector<const char*> menuItems = {tr(STR_LIBRARY), "Notes", "Remote", "Sync Notes", tr(STR_SETTINGS_TITLE)};
+  std::vector<UIIcon> menuIcons = {Library, Bookmark, Transfer, Transfer, Settings};
 
   if (hasLibrarySlot()) {
-    menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, Plugins);
+    menuItems.insert(menuItems.begin() + 1, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
+    menuIcons.insert(menuIcons.begin() + 1, Plugins);
   }
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -570,13 +569,9 @@ void HomeActivity::render(RenderLock&&) {
 
 void HomeActivity::onRecentBookSelected(const std::string& path) { activityManager.goToReader(path); }
 
-void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }
-
 void HomeActivity::onLibraryOpen() { activityManager.goToLibrary(); }
 
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
-
-void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 

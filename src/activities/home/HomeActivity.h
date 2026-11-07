@@ -41,13 +41,13 @@ class HomeActivity final : public Activity {
   // Convert HomeMenuItem to menu index (used in onEnter)
   static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
     int i = 0;
-    if (item == HomeMenuItem::FILE_BROWSER) return i;
-    ++i;
     if (item == HomeMenuItem::LIBRARY) return i;
     ++i;
     if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
     if (hasOpdsUrl) ++i;
-    if (item == HomeMenuItem::FILE_TRANSFER) return i;
+    if (item == HomeMenuItem::NOTES) return i;
+    ++i;
+    if (item == HomeMenuItem::REMOTE) return i;
     ++i;
     if (item == HomeMenuItem::SYNC_NOTES) return i;
     ++i;
@@ -58,19 +58,17 @@ class HomeActivity final : public Activity {
   // Convert menu index to HomeMenuItem (used in loop)
   static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
     int i = 0;
-    if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::LIBRARY;
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
-    if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
+    if (idx == i++) return HomeMenuItem::NOTES;
+    if (idx == i++) return HomeMenuItem::REMOTE;
     if (idx == i++) return HomeMenuItem::SYNC_NOTES;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }
   void onRecentBookSelected(const std::string& path);
-  void onFileBrowserOpen();
   void onLibraryOpen();
   void onSettingsOpen();
-  void onFileTransferOpen();
   void onOpdsBrowserOpen();
   void onPluginsOpen();
 

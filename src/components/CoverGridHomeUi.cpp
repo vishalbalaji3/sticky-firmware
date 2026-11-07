@@ -12,6 +12,7 @@
 #include "UITheme.h"
 #include "icons/blocks.h"
 #include "icons/book.h"
+#include "icons/bookmark.h"
 #include "icons/folder.h"
 #include "icons/library.h"
 #include "icons/settings2.h"
@@ -283,10 +284,11 @@ void CoverGridHomeUi::drawGrid(UiScreen& screen) {
 }
 
 void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
-  static constexpr const uint8_t* ICONS[] = {FolderIcon, LibraryIcon, BlocksIcon, TransferIcon, TransferIcon, Settings2Icon};
+  static constexpr const uint8_t* ICONS[] = {LibraryIcon,  BlocksIcon,   BookmarkIcon,
+                                             TransferIcon, TransferIcon, Settings2Icon};
   int count = 0;
-  for (int i = 0; i < 6; ++i) {  // Files, Library, OPDS, Transfer, Sync Notes, Settings
-    if (i == 2 && !hasOpds) continue;
+  for (int i = 0; i < 6; ++i) {  // Library, OPDS, Notes, Remote, Sync Notes, Settings
+    if (i == 1 && !hasOpds) continue;
     auto& tab = tabItems[count];
     tab.value = books->size() + count;
     tab.selected = selected == tab.value;
@@ -303,7 +305,7 @@ void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
   tabs.iconPainter = [](fui::DrawTarget&, fui::Rect iconRect, const fui::TabItem& tab, uint8_t, void* user) {
     const auto& self = *static_cast<CoverGridHomeUi*>(user);
     const int index = tab.value - static_cast<int>(self.books->size());
-    const int icon = !self.hasOpds && index >= 2 ? index + 1 : index;
+    const int icon = !self.hasOpds && index >= 1 ? index + 1 : index;
     self.renderer.drawIcon(ICONS[icon], iconRect.x, iconRect.y, iconRect.width);
     return true;
   };

@@ -70,6 +70,7 @@ add_subdirectory(chapter_position)
 add_subdirectory(book_metadata_cache)
 add_subdirectory(home_button)
 add_subdirectory(voice_format)
+add_subdirectory(ws_frame)
 add_subdirectory(button_press_navigation)
 
 add_subdirectory(inflate_stream)
