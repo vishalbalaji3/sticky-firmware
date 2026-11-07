@@ -81,6 +81,10 @@ constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
 // A wake hold must never become an in-app power-button action.  Boot may continue
 // while the button is held; swallow the one release that ends that wake gesture.
 static bool wakePowerReleasePending = false;
+#if FREEINK_DEVICE_STICKY
+// The note recording now was started in setup() by a hold from sleep, before its place was known.
+static bool wakeVoiceNote = false;
+#endif
 
 // Fonts
 EpdFont notosans14RegularFont(&notosans_14_regular);
@@ -591,6 +595,10 @@ void setup() {
   silentRebootPayload = 0;
 
   gpio.begin();
+#if FREEINK_DEVICE_STICKY
+  // As loop() sets it, so the wake-hold check below sees the third button as soon as it is down.
+  gpio.setSharedConfirmPowerShortPressEmitsPower(true);
+#endif
   powerManager.begin();
 
   // Board TX-power ceiling. It can only be set once WiFi has started, so it is
@@ -638,6 +646,24 @@ void setup() {
     activityManager.goToFullScreenMessage("SD card error", EpdFontFamily::BOLD);
     return;
   }
+
+#if FREEINK_DEVICE_STICKY
+  // A hold from sleep records. Capture starts before the slow display and book init, into the PSRAM ring,
+  // and is attached to its page on release (loop()).
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && !recoveryFirmwareMode) {
+    auto wake = sleepwake::WakeVoice::Wait;
+    while (true) {
+      gpio.update();
+      wake = sleepwake::wakeVoiceFor(gpio.isPressed(HalGPIO::BTN_POWER), millis());
+      if (wake != sleepwake::WakeVoice::Wait) break;
+      delay(5);
+    }
+    if (wake == sleepwake::WakeVoice::Record && voice::startRecording(voice::Place{})) {
+      wakeVoiceNote = true;
+      activityManager.drawRecordingDotAfterPaint();
+    }
+  }
+#endif
 
   HalSystem::checkPanic();
 
@@ -851,13 +877,6 @@ void setup() {
 
 #if FREEINK_DEVICE_STICKY
 static constexpr unsigned long VOICE_HOLD_MS = 500;
-
-// E-paper is too slow to confirm recording quickly, so capture is already running when this appears.
-static void drawRecordingDot() {
-  RenderLock lock;
-  renderer.fillRoundedRect(renderer.getScreenWidth() - 30, 10, 18, 18, 9, Color::Black);
-  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-}
 #endif
 
 void loop() {
@@ -1042,6 +1061,13 @@ void loop() {
       lastActivityTime = millis();
       voice::pumpRecording();
       if (!powerDown || voice::recordingFull()) {
+        if (wakeVoiceNote) {
+          // Started before the book reopened; attach it to the page that is now shown.
+          voice::Place place;
+          activityManager.fillVoicePlace(place);
+          if (!voice::updatePlace(place)) LOG_ERR("VOICE", "Kept the note in the inbox");
+          wakeVoiceNote = false;
+        }
         if (voice::stopRecording()) activityManager.notifyVoiceNoteSaved();
       }
     } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS &&
@@ -1049,7 +1075,7 @@ void loop() {
       holdConsumed = true;
       voice::Place place;
       activityManager.fillVoicePlace(place);
-      if (voice::startRecording(place)) drawRecordingDot();
+      if (voice::startRecording(place)) activityManager.drawRecordingDot();
     }
 
     if (!powerDown) {

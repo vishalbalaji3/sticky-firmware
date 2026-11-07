@@ -76,6 +76,8 @@ class ActivityManager {
   uint32_t screenVisit = 0;
   // The screen visit whose frame the render task painted last.
   std::atomic<uint32_t> paintedVisit{0};
+  std::atomic<bool> recordingDotAfterPaint{false};
+  void paintRecordingDot();  // Caller holds the RenderLock.
 
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput);
@@ -102,6 +104,10 @@ class ActivityManager {
   void goToRemote();
   void fillVoicePlace(voice::Place& place);
   void notifyVoiceNoteSaved();
+  // E-paper is too slow to confirm recording quickly, so capture is already running when this appears.
+  void drawRecordingDot();
+  // A recording begun during boot shows its dot over the first screen painted.
+  void drawRecordingDotAfterPaint() { recordingDotAfterPaint = true; }
   void goToPlugins(bool showOpds);
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);
