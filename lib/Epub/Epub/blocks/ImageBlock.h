@@ -12,6 +12,7 @@ class ImageBlock final : public Block {
   ~ImageBlock() override = default;
 
   const std::string& getImagePath() const { return imagePath; }
+  const std::string& getSrcPath() const { return srcPath; }
   int16_t getWidth() const { return width; }
   int16_t getHeight() const { return height; }
 

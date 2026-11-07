@@ -40,6 +40,7 @@
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
+#include "PictureViewerActivity.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
 #include "ReaderActivity.h"
@@ -935,6 +936,17 @@ void EpubReaderActivity::loop() {
     }
   }
 
+  // Picture taps come next, but the centered menu tap still opens the menu over a full-page picture.
+  if (!atEndOfBook && SETTINGS.touchReaderControls && mappedInput.hasTouch() &&
+      !ReaderUtils::isTouchMenuTap(renderer, mappedInput)) {
+    int touchX = 0;
+    int touchY = 0;
+    if (mappedInput.wasScreenTapped(touchX, touchY) && openPictureAt(touchX, touchY)) {
+      haptic_feedback::touchAction();
+      return;
+    }
+  }
+
   const bool touchMenu = ReaderUtils::isTouchMenuGesture(renderer, mappedInput);
   if (confirmReleased || touchMenu) {
     if (touchMenu) haptic_feedback::touchAction();
@@ -1631,8 +1643,29 @@ bool EpubReaderActivity::skipLoopDelay() {
   return overlay == Overlay::None && !buildHeapPaused && backgroundBuildWanted();
 }
 
+bool EpubReaderActivity::openPictureAt(const int x, const int y) {
+  PageImageTarget image;
+  {
+    RenderLock lock;  // renderBook() refills currentPageImages on the render task
+    const auto hit = std::find_if(currentPageImages.begin(), currentPageImages.end(), [x, y](const auto& target) {
+      return x >= target.x && y >= target.y && x < target.x + target.width && y < target.y + target.height;
+    });
+    if (hit == currentPageImages.end()) return false;
+    image = *hit;
+  }
+  // The page render extracts pictures lazily; extract here too in case that failed or was skipped.
+  if (!image.srcPath.empty() && !Storage.exists(image.path.c_str())) {
+    epub->extractItemToFile(image.srcPath, image.path);
+  }
+  automaticPageTurnActive = false;
+  startActivityForResult(std::make_unique<PictureViewerActivity>(renderer, mappedInput, image.path),
+                         [](const ActivityResult&) {});
+  return true;
+}
+
 void EpubReaderActivity::renderBook() {
   currentPageLinks.clear();
+  currentPageImages.clear();
   if (!epub) return;
   // A radio start in flight takes ~50 KB while the stack comes up: the page waits for it rather than
   // take the heap beside it (X3: abort() in a page restore at free 22,676 B). About 20 ms, once a visit.
@@ -1948,6 +1981,13 @@ void EpubReaderActivity::renderBook() {
     currentPageLinks = std::move(p->links);
     currentPageLinkMarginLeft = orientedMarginLeft;
     currentPageLinkMarginTop = orientedMarginTop;
+    for (const auto& element : p->elements) {
+      if (element->getTag() != TAG_PageImage) continue;
+      const auto& image = static_cast<const PageImage&>(*element).getImageBlock();
+      currentPageImages.push_back(
+          {image.getImagePath(), image.getSrcPath(), static_cast<int16_t>(element->xPos + orientedMarginLeft),
+           static_cast<int16_t>(element->yPos + orientedMarginTop), image.getWidth(), image.getHeight()});
+    }
 
     // The overlay and non-tiled grayscale renderer share the renderer's single
     // stored-BW slot. Release the old page snapshot before renderContents()

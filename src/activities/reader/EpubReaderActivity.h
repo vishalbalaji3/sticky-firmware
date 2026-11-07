@@ -109,6 +109,14 @@ class EpubReaderActivity final : public ReaderActivity {
   std::vector<PageLink> currentPageLinks;
   int currentPageLinkMarginLeft = 0;
   int currentPageLinkMarginTop = 0;
+  // Pictures on the current page in screen coordinates; a tap opens one full screen.
+  struct PageImageTarget {
+    std::string path;
+    std::string srcPath;
+    int16_t x, y, width, height;
+  };
+  std::vector<PageImageTarget> currentPageImages;
+  bool openPictureAt(int x, int y);
   struct SavedPosition {
     int spineIndex;
     int pageNumber;
