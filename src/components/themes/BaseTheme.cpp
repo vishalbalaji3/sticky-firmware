@@ -81,6 +81,11 @@ void BaseTheme::drawBatteryLightningBolt(const GfxRenderer& renderer, int boltX,
   renderer.drawLine(boltX + 1, boltY + 7, boltX + 2, boltY + 7, false);
 }
 
+// "--%" until the gauge has answered: a confident "0%" would read as a dead battery.
+std::string BaseTheme::batteryPercentText(const uint16_t percentage) {
+  return powerManager.isBatteryPercentageKnown() ? std::to_string(percentage) + "%" : "--%";
+}
+
 void BaseTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const {
   const bool charging = gpio.isUsbConnected();
 
@@ -123,7 +128,7 @@ void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bo
   }
 
   if (showPercentage) {
-    const auto percentageText = std::to_string(percentage) + "%";
+    const auto percentageText = batteryPercentText(percentage);
     renderer.drawText(SMALL_FONT_ID, rect.x + batteryPercentSpacing + rect.width, rect.y, percentageText.c_str());
   }
 
@@ -340,7 +345,7 @@ void BaseTheme::applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::Head
   // strings only need to outlive the fui::header() call that consumes them.
   static char percentText[8];
   if (SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS) {
-    snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned>(percentage));
+    snprintf(percentText, sizeof(percentText), "%s", batteryPercentText(percentage).c_str());
     status.battery.label = percentText;
   }
   status.battery.glyphWidth = static_cast<int16_t>(metrics.batteryWidth);
@@ -892,7 +897,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
       const uint16_t percentage = powerManager.getBatteryPercentage();
       // width of icon + spacing + text for layout purposes
       batteryWidth +=
-          batteryPercentSpacing + renderer.getTextWidth(SMALL_FONT_ID, (std::to_string(percentage) + "%").c_str());
+          batteryPercentSpacing + renderer.getTextWidth(SMALL_FONT_ID, batteryPercentText(percentage).c_str());
     }
 
     leftClusterWidth += batteryWidth;

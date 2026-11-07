@@ -32,8 +32,9 @@ bool shouldPullOnOpen(const std::string& path) {
 
 void skipNextPull(const std::string& path) { skipPullKey = bookKey(path); }
 
-void record(const std::string& path, const bool ok) {
-  lastStatus = Status{bookKey(path), ok ? Result::Ok : Result::Failed, trustedtime::trustedNow()};
+void record(const std::string& path, const bool ok, const bool pushOnly) {
+  const Result result = !ok ? Result::Failed : pushOnly ? Result::Pushed : Result::Ok;
+  lastStatus = Status{bookKey(path), result, trustedtime::trustedNow()};
   statusMagic = STATUS_MAGIC;
 }
 
@@ -119,7 +120,7 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
     if (!wasConnected) stopWifi();
   }
   LOG_DBG("KOSync", "Auto push %s: %s", ok ? "ok" : "failed", path.c_str());
-  record(path, ok);
+  record(path, ok, /*pushOnly=*/true);
   return ok;
 }
 

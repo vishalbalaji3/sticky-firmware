@@ -33,6 +33,12 @@ TEST(AutoSyncPolicy, SkipsPullRightAfterSuccessfulSync) {
   EXPECT_TRUE(shouldPullOnOpen(true, ok(kBook, kNow + 30), kBook, false, kNow));
 }
 
+// Leave on this device (push), read on in another app, reopen: the pull must run.
+TEST(AutoSyncPolicy, ExitPushDoesNotSkipPull) {
+  EXPECT_TRUE(shouldPullOnOpen(true, Status{kBook, Result::Pushed, kNow - 30}, kBook, false, kNow));
+  EXPECT_EQ("Synced just now", statusText(true, Status{kBook, Result::Pushed, kNow - 30}, kBook, kNow));
+}
+
 TEST(AutoSyncPolicy, PushOnlyWhenMoved) {
   EXPECT_FALSE(shouldPushOnExit(true, 3, 7, 3, 7));
   EXPECT_TRUE(shouldPushOnExit(true, 3, 7, 3, 8));

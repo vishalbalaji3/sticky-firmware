@@ -4,19 +4,18 @@
 #include <Logging.h>
 #include <PowerManager.h>
 #include <WiFi.h>
+#include <driver/gpio.h>
+#include <esp32-hal-i2c.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
 
 #include <cassert>
 
 #include "HalGPIO.h"
+#include "I2cBusRecovery.h"
 
 #if FREEINK_DEVICE_EEGO_A4 || FREEINK_DEVICE_PICCO
 #include <HalFrontlight.h>
-#endif
-
-#if FREEINK_DEVICE_PICCO
-#include <driver/gpio.h>
 #endif
 
 #if FREEINK_DEVICE_PAPERMONO
@@ -30,10 +29,61 @@ HalPowerManager powerManager;  // Singleton instance
 // X4 Pro display chip select.
 static constexpr gpio_num_t XTEINK_C3_GPIO13 = GPIO_NUM_13;
 
+namespace {
+// Open-drain bit-bang on the bus pins; the pull-ups supply the high level.
+struct I2cPadIo {
+  gpio_num_t sda;
+  gpio_num_t scl;
+  static void halfBit() { delayMicroseconds(5); }  // 100 kHz
+  bool sdaHigh() const { return gpio_get_level(sda) != 0; }
+  void clockScl() const {
+    gpio_set_level(scl, 0);
+    halfBit();
+    gpio_set_level(scl, 1);
+    halfBit();
+  }
+  void stop() const {
+    gpio_set_level(scl, 0);
+    gpio_set_level(sda, 0);
+    halfBit();
+    gpio_set_level(scl, 1);
+    halfBit();
+    gpio_set_level(sda, 1);
+    halfBit();
+  }
+};
+
+// Before the gauge's first Wire begin: release pad holds (they survive reset) and free a slave
+// left holding SDA by a reset mid-read. Skipped once another driver owns the controller.
+void recoverGaugeBus() {
+  const auto& g = BoardConfig::ACTIVE.batteryGauge;
+  if (g.gaugeAddr == 0 || g.i2cSda < 0 || g.i2cScl < 0) return;
+#if SOC_I2C_NUM > 1
+  if (i2cIsInit(g.i2cBus == 1 ? 1 : 0)) return;
+#else
+  if (i2cIsInit(0)) return;
+#endif
+  I2cPadIo io{static_cast<gpio_num_t>(g.i2cSda), static_cast<gpio_num_t>(g.i2cScl)};
+  for (const gpio_num_t pin : {io.sda, io.scl}) {
+    gpio_hold_dis(pin);
+    gpio_reset_pin(pin);  // back to the GPIO function, pull-up on
+    gpio_set_level(pin, 1);
+    gpio_set_direction(pin, GPIO_MODE_INPUT_OUTPUT_OD);
+  }
+  const int clocks = clearI2cBus(io);
+  if (clocks < 0) {
+    LOG_ERR("PWR", "Gauge I2C bus stuck: SDA low after 9 clocks (SCL %s)", gpio_get_level(io.scl) ? "high" : "low");
+  } else if (clocks > 0) {
+    LOG_INF("PWR", "Gauge I2C bus freed after %d clocks", clocks);
+  }
+}
+}  // namespace
+
 void HalPowerManager::begin() {
   if (BoardConfig::ACTIVE.batteryAdc >= 0) {
     pinMode(BoardConfig::ACTIVE.batteryAdc, INPUT);
   }
+  recoverGaugeBus();
   // Board charger setup (Picco SGM41562: stock charge voltage and limits); a
   // no-op on boards without a configurable charger.
   if (BatteryMonitor::configureCharger()) LOG_INF("PWR", "Charger configured");
@@ -200,6 +250,10 @@ bool HalPowerManager::holdWhileUsbPowered(HalGPIO& gpio, void (*onStatus)(bool c
 }
 #endif
 
+bool HalPowerManager::isBatteryPercentageKnown() const {
+  return BoardConfig::ACTIVE.batteryGauge.gaugeAddr == 0 || _batteryPercentKnown;
+}
+
 uint16_t HalPowerManager::getBatteryPercentage() const {
   static const BatteryMonitor battery;
   if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
@@ -213,6 +267,7 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     if (!battery.readPercentageChecked(percent)) {
       return _batteryCachedPercent;
     }
+    _batteryPercentKnown = true;
     _batteryCachedPercent = percent;
     return _batteryCachedPercent;
   }

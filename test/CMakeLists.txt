@@ -74,6 +74,7 @@ add_subdirectory(ws_frame)
 add_subdirectory(button_press_navigation)
 add_subdirectory(picture_viewport)
 add_subdirectory(auto_sync_policy)
+add_subdirectory(i2c_bus_recovery)
 
 add_subdirectory(inflate_stream)
 add_subdirectory(inflate_reader)

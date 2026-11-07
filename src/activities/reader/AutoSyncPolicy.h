@@ -6,7 +6,8 @@
 // Pure decisions behind automatic KOReader progress sync (host-tested).
 namespace autosync {
 
-enum class Result : uint8_t { None = 0, Ok = 1, Failed = 2 };
+// Pushed: only the exit push succeeded, so the server may still get newer progress from another device.
+enum class Result : uint8_t { None = 0, Ok = 1, Failed = 2, Pushed = 3 };
 
 // Last sync outcome for one book. No member initializers: it lives in RTC
 // memory, where a constructor would wipe it at boot.
@@ -23,7 +24,8 @@ inline uint32_t bookKey(const std::string& path) {
   return hash;
 }
 
-// A book synced this recently (the manual sync reboots straight back into it) needs no second pull.
+// A book pulled or manually synced this recently (the manual sync reboots straight back into it)
+// needs no second pull. An exit push does not count: the other device may have read on since.
 constexpr int64_t kRecentSyncSeconds = 120;
 
 // returningFromSync: the reader reopened by the sync activity itself, which must not pull again.
@@ -44,7 +46,7 @@ inline bool shouldPushOnExit(const bool hasCredentials, const int openSpine, con
 
 inline std::string statusText(const bool hasCredentials, const Status& status, const uint32_t key, const int64_t now) {
   if (!hasCredentials) return "Sync off (set up in Settings)";
-  if (status.bookKey != key || status.result != Result::Ok) return "Not synced";
+  if (status.bookKey != key || (status.result != Result::Ok && status.result != Result::Pushed)) return "Not synced";
   if (status.at <= 0 || now <= 0) return "Synced";
   const int64_t age = now > status.at ? now - status.at : 0;
   if (age < 60) return "Synced just now";

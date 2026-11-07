@@ -843,7 +843,26 @@ void SleepActivity::renderLockScreen() const {
   renderer.drawLine(0, 110, width, 110);
   if (date[0]) renderer.drawCenteredText(UI_12_FONT_ID, 26, date, true, EpdFontFamily::BOLD);
   if (!details.empty()) renderer.drawCenteredText(UI_10_FONT_ID, 66, details.c_str());
+  drawAsleepMarker();
   renderer.displayBuffer(kSleepClean);
+}
+
+// The panel keeps the last frame when powered down, so this is how the owner tells sleep from awake.
+void SleepActivity::drawAsleepMarker() const {
+  constexpr int kX = 12;
+  constexpr int kY = 8;
+  constexpr int kMoon = 16;
+  // Crescent: a black disc with a white one bitten out of its upper right.
+  renderer.fillRoundedRect(kX, kY, kMoon, kMoon, kMoon / 2, Color::Black);
+  renderer.fillRoundedRect(kX + 6, kY - 3, kMoon - 2, kMoon - 2, (kMoon - 2) / 2, Color::White);
+  const char* label = tr(STR_SLEEPING);
+  const int textX = kX + kMoon + 6;
+  renderer.drawText(SMALL_FONT_ID, textX, kY, label);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  GUI.drawBatteryLeft(
+      renderer,
+      Rect{textX + renderer.getTextWidth(SMALL_FONT_ID, label) + 10, kY, metrics.batteryWidth, metrics.batteryHeight},
+      true);
 }
 
 void SleepActivity::renderCustomSleepScreen() const {

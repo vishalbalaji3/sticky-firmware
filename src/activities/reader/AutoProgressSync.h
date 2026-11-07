@@ -20,7 +20,8 @@ constexpr unsigned long kJoinTimeoutMs = 5000;
 bool shouldPullOnOpen(const std::string& path);
 // Called when launching the automatic sync: the reader it reopens skips its pull once.
 void skipNextPull(const std::string& path);
-void record(const std::string& path, bool ok);
+// pushOnly: the exit push, which must not suppress the next open's pull.
+void record(const std::string& path, bool ok, bool pushOnly = false);
 std::string statusText(const std::string& path);
 
 // Upload record for the local position, shared with the manual sync.
