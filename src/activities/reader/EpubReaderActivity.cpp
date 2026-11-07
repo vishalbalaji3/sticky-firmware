@@ -60,6 +60,8 @@
 #include "util/BookmarkUtil.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
+#include "voice/VoiceFormat.h"
+#include "voice/VoiceNotes.h"
 
 namespace {
 // The X4 Pro and X4 Classic carry the X4's panel but sit outside isXteinkDevice()
@@ -1569,6 +1571,17 @@ void EpubReaderActivity::beginLoanTimeSync() {
     silentRestartToReader();
     activityManager.goToReader(bookPath);
   });
+}
+
+void EpubReaderActivity::addVoicePlace(voice::Place& place) {
+  if (!epub) return;
+  place.bookTitle = voice::titleOrFileName(epub->getTitle(), epub->getPath());
+  place.bookAuthor = epub->getAuthor();
+  place.bookId = voice::bookIdFor(place.bookTitle, place.bookAuthor);
+  const int tocIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
+  if (tocIndex >= 0) place.chapter = epub->getTocItem(tocIndex).title;
+  place.spineIndex = currentSpineIndex;
+  place.page = section ? section->currentPage : -1;
 }
 
 void EpubReaderActivity::render(RenderLock&& lock) {

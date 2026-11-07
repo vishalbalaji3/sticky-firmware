@@ -13,6 +13,10 @@
 #include "RenderLock.h"
 #include "util/ScreenshotInfo.h"
 
+namespace voice {
+struct Place;
+}
+
 class Activity {
   friend class ActivityManager;
 
@@ -53,6 +57,9 @@ class Activity {
   // Returns true when the activity schedules its own forced refresh.
   virtual bool handleForcedRefresh() { return false; }
   virtual bool isHomeActivity() const { return false; }
+  // Called from the bottom of the stack up, so a selection can refine what its reader reported.
+  virtual void addVoicePlace(voice::Place&) {}
+  virtual void onVoiceNoteSaved() {}
   virtual bool handleHomeGesture() { return false; }
   virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
 

@@ -44,6 +44,8 @@ class ClipSelectionActivity final : public Activity {
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
   bool handleHomeGesture() override;
+  void addVoicePlace(voice::Place& place) override;
+  void onVoiceNoteSaved() override;
 
  private:
   struct WordBox {

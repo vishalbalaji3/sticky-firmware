@@ -51,6 +51,7 @@
 #include "util/ScreenshotUtil.h"
 #include "util/SlideSwitch.h"
 #include "util/Timezones.h"
+#include "voice/VoiceNotes.h"
 
 #if CROSSPOINT_VECTOR_FONTS
 // Rendering (incl. FreeType TTF rasterization) runs on the Arduino loop task.
@@ -661,6 +662,9 @@ void setup() {
     SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
   }
   SETTINGS.loadFromFile();
+#if FREEINK_DEVICE_STICKY
+  SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::IGNORE;  // loop() handles this button itself.
+#endif
   // Push the saved timezone's POSIX rule into the clock (migrating the legacy
   // UTC-offset setting on first boot after the update).
   timezones::applyToClock();
@@ -846,12 +850,28 @@ void setup() {
   allowSleepAt = millis() + 2000;
 }
 
+#if FREEINK_DEVICE_STICKY
+static constexpr unsigned long VOICE_HOLD_MS = 500;
+
+// E-paper is too slow to confirm recording quickly, so capture is already running when this appears.
+static void drawRecordingDot() {
+  RenderLock lock;
+  renderer.fillRoundedRect(renderer.getScreenWidth() - 30, 10, 18, 18, 9, Color::Black);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+#endif
+
 void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
   static unsigned long lastMemPrint = 0;
 
+#if FREEINK_DEVICE_STICKY
+  // The third button is ours: a click goes home and a hold records. Confirm comes from touch.
+  gpio.setSharedConfirmPowerShortPressEmitsPower(true);
+#else
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
+#endif
   mappedInputManager.update();
 
   // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
@@ -1007,6 +1027,44 @@ void loop() {
     return;
   }
 
+#if FREEINK_DEVICE_STICKY
+  {
+    static bool holdConsumed = false;
+    static bool releasedSinceWake = false;
+    const bool powerDown = gpio.isPressed(HalGPIO::BTN_POWER);
+
+    if (gpio.isPressed(HalGPIO::BTN_UP) && gpio.isPressed(HalGPIO::BTN_DOWN) && millis() >= allowSleepAt &&
+        !voice::isRecording()) {
+      enterDeepSleep();
+      return;
+    }
+
+    if (voice::isRecording()) {
+      lastActivityTime = millis();
+      voice::pumpRecording();
+      if (!powerDown || voice::recordingFull()) {
+        voice::stopRecording();
+        activityManager.notifyVoiceNoteSaved();
+      }
+    } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS &&
+               WiFi.getMode() == WIFI_MODE_NULL) {
+      holdConsumed = true;
+      voice::Place place;
+      activityManager.fillVoicePlace(place);
+      if (voice::startRecording(place)) drawRecordingDot();
+    }
+
+    if (!powerDown) {
+      if (mappedInputManager.wasReleased(MappedInputManager::Button::Power) && releasedSinceWake && !holdConsumed &&
+          !activityManager.isForegroundHomeShown()) {
+        activityManager.goHome();
+      }
+      releasedSinceWake = true;
+      holdConsumed = false;
+    }
+  }
+#endif
+
   const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
   if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
     LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
@@ -1028,6 +1086,7 @@ void loop() {
                                         SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP &&
                                         gpio.getPowerButtonHeldTime() <= X4PRO_POWER_CLICK_MAX_HOLD_MS;
 
+#if !FREEINK_DEVICE_STICKY  // Sleep is Page Up + Page Down there, because holding this button records.
   if (!x4ProAwaitingClickWindow && powerReleasedSinceWake && millis() >= allowSleepAt &&
       gpio.isPressed(HalGPIO::BTN_POWER) && gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
     // If the screenshot combination is potentially being pressed, don't sleep
@@ -1039,6 +1098,7 @@ void loop() {
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
     return;
   }
+#endif
 
 #if FREEINK_DEVICE_PAPERMONO
   // Paper Mono reports the PMIC power button as a one-tick click, so the held

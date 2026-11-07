@@ -7,6 +7,7 @@
 #include <HalGPIO.h>
 #include <I18n.h>
 #include <WiFi.h>
+#include <esp_random.h>
 
 #include <cstddef>
 
@@ -24,7 +25,13 @@
 namespace {
 // AP Mode configuration
 constexpr const char* AP_SSID = "CrossPoint-Reader";
-constexpr const char* AP_PASSWORD = nullptr;  // Open network for ease of use
+// Regenerated per session and shown on screen. The open stock hotspot would send Wi-Fi passwords in clear.
+char apPassword[11] = {};
+
+void generateApPassword() {
+  static constexpr char kChars[] = "abcdefghjkmnpqrstuvwxyz23456789";
+  for (size_t i = 0; i + 1 < sizeof(apPassword); ++i) apPassword[i] = kChars[esp_random() % (sizeof(kChars) - 1)];
+}
 constexpr const char* AP_HOSTNAME = "crosspoint";
 constexpr uint8_t AP_CHANNEL = 1;
 constexpr uint8_t AP_MAX_CONNECTIONS = 4;
@@ -244,13 +251,8 @@ void CrossPointWebServerActivity::startAccessPoint() {
   delay(100);
 
   // Start soft AP
-  bool apStarted;
-  if (AP_PASSWORD && strlen(AP_PASSWORD) >= 8) {
-    apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
-  } else {
-    // Open network (no password)
-    apStarted = WiFi.softAP(AP_SSID, nullptr, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
-  }
+  generateApPassword();
+  const bool apStarted = WiFi.softAP(AP_SSID, apPassword, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
 
   if (!apStarted) {
     LOG_ERR("WEBACT", "ERROR: Failed to start Access Point!");
@@ -488,13 +490,15 @@ void CrossPointWebServerActivity::renderServerRunning() const {
 
     // Show QR code for Wifi
     // follows spec at https://github.com/zxing/zxing/wiki/Barcode-Contents#wi-fi-network-config-android-ios-11
-    const std::string wifiConfig = std::string("WIFI:T:nopass;S:") + connectedSSID + ";;";
+    const std::string wifiConfig = std::string("WIFI:T:WPA;S:") + connectedSSID + ";P:" + apPassword + ";;";
     const Rect qrBoundsWifi(metrics.contentSidePadding, startY, QR_CODE_WIDTH, QR_CODE_HEIGHT);
     QrUtils::drawQrCode(renderer, qrBoundsWifi, wifiConfig);
 
     // Show network name
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding + QR_CODE_WIDTH + metrics.verticalSpacing, startY + 80,
                       connectedSSID.c_str());
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding + QR_CODE_WIDTH + metrics.verticalSpacing,
+                      startY + 80 + height10 + metrics.verticalSpacing, apPassword);
 
     startY += QR_CODE_HEIGHT + 2 * metrics.verticalSpacing;
 

@@ -22,6 +22,7 @@
 #include "components/UITheme.h"
 #include "util/DictionaryRegistry.h"
 #include "util/WordSelectionInput.h"
+#include "voice/VoiceNotes.h"
 
 using Input = WordSelectionInput;
 
@@ -360,6 +361,39 @@ void ClipSelectionActivity::moveToPage(const int pageOffset) {
       return;
     }
   }
+}
+
+void ClipSelectionActivity::addVoicePlace(voice::Place& place) {
+  if (isLookup() || wordCount == 0 || selected < 0) return;
+  const int anchor = rangeStart < 0 ? selected : rangeStart;
+  const int first = std::min(anchor, selected);
+  const int last = std::max(anchor, selected);
+  // buildSelectedText's reserve() aborts on OOM, so check first as confirmSelection does.
+  const auto heap = HalMemory::getDefaultHeap();
+  if (heap.largestBlockBytes < CLIPPING_TEXT_MAX + 1 || !buildSelectedText(first, last, place.quote)) {
+    place.quote.clear();  // Too long to quote, so the note attaches to the page instead.
+    return;
+  }
+  if (place.page >= 0) place.page += words[first].pageOffset;
+  bool offsetsKnown = true;
+  uint32_t start = UINT32_MAX;
+  uint32_t end = 0;
+  for (int i = first; i <= last; ++i) {
+    if (words[i].startOffset == UINT32_MAX || words[i].endOffset == UINT32_MAX) offsetsKnown = false;
+    start = std::min(start, words[i].startOffset);
+    end = std::max(end, words[i].endOffset);
+  }
+  if (offsetsKnown) {
+    place.startOffset = start;
+    place.endOffset = end;
+  }
+}
+
+void ClipSelectionActivity::onVoiceNoteSaved() {
+  if (isLookup()) return;  // The dictionary shares this screen, and a lookup is not a clipping.
+  // A note on selected text also saves a normal clipping, through the usual path.
+  if (rangeStart < 0) rangeStart = selected;
+  confirmSelection(ClippingResult::Action::Clip);
 }
 
 bool ClipSelectionActivity::buildSelectedText(const int first, const int last, std::string& text) const {

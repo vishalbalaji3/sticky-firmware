@@ -143,7 +143,6 @@ void SettingsActivity::rebuildSettings() {
   // stock layout has one app slot (partitions_picco.csv), so it cannot update
   // itself either way.
   if (!BoardConfig::isPicco()) {
-    addAction(SettingsSection::General, StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates);
     addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
   }
   addAction(SettingsSection::General, StrId::STR_ABOUT, SettingAction::About);

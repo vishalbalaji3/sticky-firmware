@@ -49,6 +49,8 @@ class HomeActivity final : public Activity {
     if (hasOpdsUrl) ++i;
     if (item == HomeMenuItem::FILE_TRANSFER) return i;
     ++i;
+    if (item == HomeMenuItem::SYNC_NOTES) return i;
+    ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     return 0;
   }
@@ -60,6 +62,7 @@ class HomeActivity final : public Activity {
     if (idx == i++) return HomeMenuItem::LIBRARY;
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
+    if (idx == i++) return HomeMenuItem::SYNC_NOTES;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }

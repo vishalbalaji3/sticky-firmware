@@ -47,3 +47,10 @@ TEST(ProtectedPaths, PluginPathRules) {
   EXPECT_TRUE(isPluginPath("/.crosspoint/month-wallpaper.json"));
   EXPECT_TRUE(isPluginPath("/Books/new.epub"));
 }
+
+TEST(ProtectedPaths, StickyTokenAndNotesStayOffTheWebServer) {
+  EXPECT_TRUE(protectedpaths::isSensitivePath("/.sticky/config.json"));
+  EXPECT_TRUE(protectedpaths::isSensitivePath("/.sticky/notes/abc.wav"));
+  EXPECT_TRUE(protectedpaths::isSensitivePath("//.sticky/./notes/../config.json"));
+  EXPECT_FALSE(protectedpaths::isSensitivePath("/Books/.sticky.epub"));
+}

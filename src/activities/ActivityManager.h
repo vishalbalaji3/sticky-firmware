@@ -18,7 +18,11 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+namespace voice {
+struct Place;
+}
+
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SYNC_NOTES, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -92,6 +96,9 @@ class ActivityManager {
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();
+  void goToSyncNotes();
+  void fillVoicePlace(voice::Place& place);
+  void notifyVoiceNoteSaved();
   void goToPlugins(bool showOpds);
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);

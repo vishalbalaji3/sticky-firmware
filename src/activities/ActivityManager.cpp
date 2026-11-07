@@ -15,6 +15,7 @@
 #include "CrossPointSettings.h"
 #include "HapticFeedback.h"
 #include "OpdsServerStore.h"
+#include "activities/voice/SyncNotesActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -33,6 +34,7 @@
 #include "util/BmpViewerActivity.h"
 #include "util/FrontlightPanelActivity.h"
 #include "util/FullScreenMessageActivity.h"
+#include "voice/VoiceNotes.h"
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -308,6 +310,19 @@ void ActivityManager::goToLibrary() {
     return;
   }
   replaceActivity(std::move(activity));
+}
+
+void ActivityManager::goToSyncNotes() { replaceActivity(std::make_unique<SyncNotesActivity>(renderer, mappedInput)); }
+
+void ActivityManager::fillVoicePlace(voice::Place& place) {
+  RenderLock lock;
+  for (const auto& activity : stackActivities) activity->addVoicePlace(place);
+  if (currentActivity) currentActivity->addVoicePlace(place);
+}
+
+void ActivityManager::notifyVoiceNoteSaved() {
+  if (currentActivity) currentActivity->onVoiceNoteSaved();
+  requestUpdate(true);
 }
 
 void ActivityManager::goToBrowser() {
