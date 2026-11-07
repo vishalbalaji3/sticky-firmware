@@ -27,6 +27,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "SleepWakePolicy.h"
 #include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -692,7 +693,12 @@ void SleepActivity::onEnter() {
   Activity::onEnter();
 
 #if FREEINK_DEVICE_STICKY
-  return renderLockScreen();
+  if (sleepwake::stickyScreenFor(fromTimeout) == sleepwake::StickyScreen::Dashboard) return renderLockScreen();
+  // Keep the shown frame and add only the badge; main.cpp saves it as a Quick Resume frame.
+  if (APP_STATE.lastSleepFromReader) ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  drawAsleepMarker(/*compact=*/true);
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  return renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 #endif
 
   const bool renderQuickResume =
@@ -848,21 +854,26 @@ void SleepActivity::renderLockScreen() const {
 }
 
 // The panel keeps the last frame when powered down, so this is how the owner tells sleep from awake.
-void SleepActivity::drawAsleepMarker() const {
+// Compact: moon and battery on a small white card, for drawing over a kept page.
+void SleepActivity::drawAsleepMarker(const bool compact) const {
   constexpr int kX = 12;
   constexpr int kY = 8;
   constexpr int kMoon = 16;
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const char* label = compact ? nullptr : tr(STR_SLEEPING);
+  const int batteryX = kX + kMoon + (label ? 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10 : 8);
+  if (compact) {
+    // drawBatteryLeft puts the percentage after the icon; leave room for "100%".
+    const int right = batteryX + metrics.batteryWidth + 4 + renderer.getTextWidth(SMALL_FONT_ID, "100%") + 6;
+    const int bottom = kY + std::max(kMoon, renderer.getLineHeight(SMALL_FONT_ID)) + 4;
+    renderer.fillRoundedRect(kX - 6, kY - 5, right - kX + 6, bottom - kY + 5, 6, Color::White);
+    renderer.drawRoundedRect(kX - 6, kY - 5, right - kX + 6, bottom - kY + 5, 1, 6, true);
+  }
   // Crescent: a black disc with a white one bitten out of its upper right.
   renderer.fillRoundedRect(kX, kY, kMoon, kMoon, kMoon / 2, Color::Black);
   renderer.fillRoundedRect(kX + 6, kY - 3, kMoon - 2, kMoon - 2, (kMoon - 2) / 2, Color::White);
-  const char* label = tr(STR_SLEEPING);
-  const int textX = kX + kMoon + 6;
-  renderer.drawText(SMALL_FONT_ID, textX, kY, label);
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  GUI.drawBatteryLeft(
-      renderer,
-      Rect{textX + renderer.getTextWidth(SMALL_FONT_ID, label) + 10, kY, metrics.batteryWidth, metrics.batteryHeight},
-      true);
+  if (label) renderer.drawText(SMALL_FONT_ID, kX + kMoon + 6, kY, label);
+  GUI.drawBatteryLeft(renderer, Rect{batteryX, kY, metrics.batteryWidth, metrics.batteryHeight}, true);
 }
 
 void SleepActivity::renderCustomSleepScreen() const {
