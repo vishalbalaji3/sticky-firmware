@@ -214,7 +214,13 @@ class EpubReaderActivity final : public ReaderActivity {
   int clippingAtPoint(const Page& page, int x, int y) const;
   void openClippings();
   void applyProgressChange(const ProgressChangeResult& progress);
-  bool launchKOReaderSync();
+  bool launchKOReaderSync(bool automatic = false);
+  bool autoPullOnOpen();
+  // Automatic progress sync: the position the book opened at (spine -1 until the
+  // first page shows), and whether the reader is leaving for the sync activity.
+  int openSpineIndex = -1;
+  int openPageNumber = 0;
+  bool leavingForSync = false;
   unsigned long confirmLongPressThreshold() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void loadCachedBookmarks();
@@ -263,6 +269,7 @@ class EpubReaderActivity final : public ReaderActivity {
       : ReaderActivity("EpubReader", renderer, mappedInput, std::move(bookPath), allowFastInitialRefresh) {}
   ~EpubReaderActivity() override;
 
+  void onExit() override;
   void loop() override;
   void render(RenderLock&& lock) override;
 

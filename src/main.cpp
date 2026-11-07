@@ -39,12 +39,12 @@
 #include "OpdsTokenStore.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
-#include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/SavedWifi.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/PluginEvents.h"
@@ -410,19 +410,10 @@ static void deliverSleepPluginEvents(const bool allowNetwork) {
   if (!pluginevents::wantsConnectAny()) return;
   if (powerManager.getBatteryPercentage() < 20) return;
   // Sleep can be the first WiFi use since boot or deep-sleep wake.
-  WIFI_STORE.loadFromFile();
-  const auto cred = WIFI_STORE.findCredential(WIFI_STORE.getLastConnectedSsid());
-  if (!cred) return;
+  if (!hasLastSavedWifi()) return;
 
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
-  const unsigned long joinDeadline = millis() + 10000;
-  while (WiFi.status() != WL_CONNECTED && millis() < joinDeadline) {
-    delay(100);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    trustedtime::startSync();  // snap the clock floor while the network is up
+  if (joinLastSavedWifi(10000)) {
     pluginevents::drain(&renderer);
   } else {
     LOG_DBG("MAIN", "Sleep-event WiFi join timed out; deferring delivery");

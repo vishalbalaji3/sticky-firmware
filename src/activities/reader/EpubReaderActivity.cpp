@@ -24,6 +24,7 @@
 #include <limits>
 
 #include "../../util/BookmarkFile.h"
+#include "AutoProgressSync.h"
 #include "BookmarkEntry.h"
 #include "ChapterBuildGate.h"
 #include "ClipSelectionActivity.h"
@@ -58,8 +59,10 @@
 #include "clippings/ClippingsManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/SavedWifi.h"
 #include "util/BookmarkUtil.h"
 #include "util/ButtonNavigator.h"
+#include "util/PluginEvents.h"
 #include "util/ScreenshotUtil.h"
 #include "voice/VoiceFormat.h"
 #include "voice/VoiceNotes.h"
@@ -663,6 +666,9 @@ void EpubReaderActivity::loop() {
   }
 
   rememberBookOnceRendered();
+  if (openSpineIndex < 0 && section && pageRendered.load(std::memory_order_acquire) && autoPullOnOpen()) {
+    return;
+  }
 
   // The radio stopped for a chapter build: once the render task has let go of the lock, that page
   // is on screen; once the build tick below has finished the chapter, no parser is left alive and
@@ -1342,16 +1348,55 @@ unsigned long EpubReaderActivity::confirmLongPressThreshold() const {
   }
 }
 
-bool EpubReaderActivity::launchKOReaderSync() {
+bool EpubReaderActivity::autoPullOnOpen() {
+  openSpineIndex = currentSpineIndex;
+  openPageNumber = section->currentPage;
+  if (!autosync::shouldPullOnOpen(bookPath)) return false;
+  {
+    RenderLock lock(*this);  // the saved networks are read from the card, which shares SPI with the display
+    if (!hasLastSavedWifi()) {
+      autosync::record(bookPath, false);
+      return false;
+    }
+    GUI.drawPopup(renderer, "Syncing progress...");
+  }
+  if (joinLastSavedWifi(autosync::kJoinTimeoutMs)) {
+    launchKOReaderSync(/*automatic=*/true);
+    if (leavingForSync) return true;  // otherwise saving progress failed and the reader stays
+  }
+  stopWifi();
+  autosync::record(bookPath, false);
+  requestUpdate();  // paint the page over the popup
+  return false;
+}
+
+void EpubReaderActivity::onExit() {
+  const int page = section ? section->currentPage : nextPageNumber;
+  const bool push = !leavingForSync && epub &&
+                    autosync::shouldPushOnExit(KOREADER_STORE.hasCredentials(), openSpineIndex, openPageNumber,
+                                               currentSpineIndex, page);
+  const CrossPointPosition position = push ? getCurrentPosition() : CrossPointPosition{};
+  ReaderActivity::onExit();
+  if (!push) return;
+  // ActivityManager holds the render lock here, so draw directly.
+  GUI.drawPopup(renderer, "Syncing progress...");
+  autosync::pushProgress(epub, position);
+}
+
+bool EpubReaderActivity::launchKOReaderSync(const bool automatic) {
   flushReaderSession();
 
   // Without a KOReader server the sync activity only brings the device online
-  // and drains that outbox; a failed join exits back to the reader with the
-  // events still queued.
+  // and drains the plugin outboxes; a failed join exits back to the reader with
+  // the events still queued. With no plugin either it explains how to set up sync.
   if (!KOREADER_STORE.hasCredentials()) {
+    bool pluginEventsOnly = false;
+    for (size_t event = 0; !pluginEventsOnly && event < static_cast<size_t>(pluginevents::Event::COUNT); ++event) {
+      pluginEventsOnly = pluginevents::anySubscriber(static_cast<pluginevents::Event>(event));
+    }
+    leavingForSync = true;
     activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
-        renderer, mappedInput, epub->getPath(), getCurrentPosition(), SavedProgressPosition{}, "",
-        /*pluginEventsOnly=*/true));
+        renderer, mappedInput, epub->getPath(), getCurrentPosition(), SavedProgressPosition{}, "", pluginEventsOnly));
     return true;
   }
 
@@ -1396,8 +1441,11 @@ bool EpubReaderActivity::launchKOReaderSync() {
   }
   LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());
 
+  leavingForSync = true;
+  if (automatic) autosync::skipNextPull(savedEpubPath);
   activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
-      renderer, mappedInput, savedEpubPath, localPos, std::move(localKoPos), std::move(localChapterName)));
+      renderer, mappedInput, savedEpubPath, localPos, std::move(localKoPos), std::move(localChapterName),
+      /*pluginEventsOnly=*/false, automatic));
   return true;
 }
 

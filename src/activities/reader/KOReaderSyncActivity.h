@@ -24,7 +24,8 @@ class KOReaderSyncActivity final : public Activity, private UiAppHost {
  public:
   explicit KOReaderSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& epubPath,
                                 CrossPointPosition localPosition, SavedProgressPosition localKoPos,
-                                std::string localChapterName, const bool pluginEventsOnly = false);
+                                std::string localChapterName, const bool pluginEventsOnly = false,
+                                const bool automatic = false);
 
   void onEnter() override;
   void onExit() override;
@@ -80,12 +81,17 @@ class KOReaderSyncActivity final : public Activity, private UiAppHost {
   // plugged-outbox events instead of syncing progress.
   bool pluginEventsOnly = false;
 
+  // Opened by the reader on book open, with WiFi already joined: no screens
+  // except the compare choice, and WiFi goes off on exit instead of a reboot.
+  bool automatic = false;
+
   void onWifiSelectionComplete(bool success);
   void performSync();
   void performUpload();
   bool smartSyncEnabled() const;
   void markAutoReturn();
   void completeAlreadySynced();
+  void failSync(std::string message);
   void ensureEpubLoaded();
   void saveProgressAndReturn(int spineIndex, int page);
   void returnToReader();

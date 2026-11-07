@@ -88,4 +88,5 @@ class EpubReaderMenuActivity final : public UiListActivity {
   int currentPage = 0;
   int totalPages = 0;
   int bookProgressPercent = 0;
+  std::string syncStatus;  // backs the Sync Progress row's subtitle
 };

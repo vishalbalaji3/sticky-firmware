@@ -5,12 +5,12 @@
 #include <HalFrontlight.h>
 #include <I18n.h>
 
+#include "AutoProgressSync.h"
 #include "CrossPointSettings.h"
-#include "KOReaderCredentialStore.h"
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "components/UITheme.h"
-#include "util/PluginEvents.h"
 #include "util/SlideSwitch.h"
 
 namespace fui = freeink::ui;
@@ -26,7 +26,8 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
       pendingOrientation(currentOrientation),
       currentPage(currentPage),
       totalPages(totalPages),
-      bookProgressPercent(bookProgressPercent) {
+      bookProgressPercent(bookProgressPercent),
+      syncStatus(autosync::statusText(APP_STATE.openEpubPath)) {
   buildMenuItems(menuItems, hasFootnotes, hasBookmarks, hasClippings);
   buildMenuRowItems();
 }
@@ -57,6 +58,7 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
     fui::ListItem item;
     item.label = I18N.get(menuItems[i].labelId);
     item.actionValue = static_cast<int16_t>(i);
+    if (menuItems[i].action == MenuAction::SYNC) item.subtitle = syncStatus.c_str();
     menuRowItems[i] = item;
   }
 }
@@ -95,13 +97,8 @@ void EpubReaderMenuActivity::buildMenuItems(std::vector<MenuItem>& items, const 
   items.push_back({MenuAction::SCREENSHOT, StrId::STR_SCREENSHOT_BUTTON});
   items.push_back({MenuAction::DISPLAY_QR, StrId::STR_DISPLAY_QR});
   items.push_back({MenuAction::GO_HOME, StrId::STR_GO_HOME_BUTTON});
-  bool canSync = KOREADER_STORE.hasCredentials();
-  for (size_t event = 0; !canSync && event < static_cast<size_t>(pluginevents::Event::COUNT); ++event) {
-    canSync = pluginevents::anySubscriber(static_cast<pluginevents::Event>(event));
-  }
-  if (canSync) {
-    items.push_back({MenuAction::SYNC, StrId::STR_SYNC_PROGRESS});
-  }
+  // Always listed so sync can be found; without credentials it explains the setup.
+  items.push_back({MenuAction::SYNC, StrId::STR_SYNC_PROGRESS});
   items.push_back({MenuAction::DELETE_CACHE, StrId::STR_DELETE_CACHE});
   items.push_back({MenuAction::TEXT_SETTINGS, StrId::STR_TEXT_SETTINGS});
 }
