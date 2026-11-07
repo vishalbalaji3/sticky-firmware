@@ -145,6 +145,8 @@ bool startRecording(const Place& place) {
 
 bool isRecording() { return recording; }
 
+bool updatePlace(const Place& place) { return recording && writeMeta(clientId, place); }
+
 void pumpRecording() {
   if (!recording) return;
   const int16_t* samples;

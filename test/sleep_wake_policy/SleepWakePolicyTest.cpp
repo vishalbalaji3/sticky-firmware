@@ -19,3 +19,11 @@ TEST(SleepWakePolicy, WakeGoesHomeOtherwise) {
   EXPECT_FALSE(sleepwake::wakeReopensBook(true, true, true, false));    // Back held on wake
   EXPECT_FALSE(sleepwake::wakeReopensBook(true, true, false, true));    // last reader open crashed
 }
+
+TEST(SleepWakePolicy, WakeHoldRecordsAndClickDoesNot) {
+  using sleepwake::WakeVoice;
+  EXPECT_EQ(sleepwake::wakeVoiceFor(true, sleepwake::kWakeVoiceHoldMs), WakeVoice::Record);
+  EXPECT_EQ(sleepwake::wakeVoiceFor(true, sleepwake::kWakeVoiceHoldMs - 1), WakeVoice::Wait);
+  EXPECT_EQ(sleepwake::wakeVoiceFor(false, 50), WakeVoice::No);  // released early: a click
+  EXPECT_EQ(sleepwake::wakeVoiceFor(false, 5000), WakeVoice::No);
+}

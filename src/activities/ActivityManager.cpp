@@ -94,6 +94,14 @@ void ActivityManager::renderTaskLoop() {
       const uint32_t renderingVisit = screenVisit;
       currentActivity->render(std::move(lock));
       paintedVisit.store(renderingVisit, std::memory_order_release);
+      if (recordingDotAfterPaint.exchange(false) && voice::isRecording()) {
+        // render() may or may not have released the lock it was handed.
+        if (lock.ownsLock()) {
+          paintRecordingDot();
+        } else {
+          drawRecordingDot();
+        }
+      }
     }
     // Notify any task blocked in requestUpdateAndWait() that the render is done.
     TaskHandle_t waiter = nullptr;
@@ -327,6 +335,16 @@ void ActivityManager::fillVoicePlace(voice::Place& place) {
   RenderLock lock;
   for (const auto& activity : stackActivities) activity->addVoicePlace(place);
   if (currentActivity) currentActivity->addVoicePlace(place);
+}
+
+void ActivityManager::paintRecordingDot() {
+  renderer.fillRoundedRect(renderer.getScreenWidth() - 30, 10, 18, 18, 9, Color::Black);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+void ActivityManager::drawRecordingDot() {
+  RenderLock lock;
+  paintRecordingDot();
 }
 
 void ActivityManager::notifyVoiceNoteSaved() {

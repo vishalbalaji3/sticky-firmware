@@ -25,6 +25,8 @@ struct Place {
 // Starts capture. Returns false if the mic, memory or card is unavailable; nothing is left behind.
 bool startRecording(const Place& place);
 bool isRecording();
+// Re-attaches the note being recorded, for a capture that began before the place was known.
+bool updatePlace(const Place& place);
 // Moves captured audio to the card. Call often from the main loop while recording.
 void pumpRecording();
 // True once a note reaches the size the cloud API accepts.

@@ -16,4 +16,14 @@ constexpr bool wakeReopensBook(const bool hasOpenBook, const bool sleptInReader,
   return hasOpenBook && sleptInReader && !backHeld && !readerCrashed;
 }
 
+// Sticky: a third-button wake still held this long after boot records a voice note; an earlier release is a click.
+constexpr unsigned long kWakeVoiceHoldMs = 300;
+
+enum class WakeVoice { No, Wait, Record };
+
+constexpr WakeVoice wakeVoiceFor(const bool held, const unsigned long sinceBootMs) {
+  if (!held) return WakeVoice::No;
+  return sinceBootMs >= kWakeVoiceHoldMs ? WakeVoice::Record : WakeVoice::Wait;
+}
+
 }  // namespace sleepwake
