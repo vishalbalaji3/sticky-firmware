@@ -42,8 +42,7 @@ inline bool shouldPushOnExit(const bool hasCredentials, const int openSpine, con
   return hasCredentials && openSpine >= 0 && (spine != openSpine || page != openPage);
 }
 
-inline std::string statusText(const bool hasCredentials, const Status& status, const uint32_t key,
-                              const int64_t now) {
+inline std::string statusText(const bool hasCredentials, const Status& status, const uint32_t key, const int64_t now) {
   if (!hasCredentials) return "Sync off (set up in Settings)";
   if (status.bookKey != key || status.result != Result::Ok) return "Not synced";
   if (status.at <= 0 || now <= 0) return "Synced";

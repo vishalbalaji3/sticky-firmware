@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HalStorage.h>
+#include <Logging.h>
 
 #include "TrustRoots.h"
 #include "VoiceFormat.h"
@@ -27,7 +28,11 @@ bool writeAll(freeink::SecureClient& client, const uint8_t* data, size_t size) {
 int secureRequest(const Request& request) {
   freeink::SecureClient client;
   client.setCACert(kTrustRoots);
-  if (!client.connect(request.host.c_str(), 443)) return -1;
+  if (!client.connect(request.host.c_str(), 443)) {
+    LOG_ERR("NET", "TLS connect to %s failed",
+            request.host.c_str());  // SecureClient's own detail needs a host-side DTR.
+    return -1;
+  }
 
   std::string head = std::string(request.method) + " " + request.target + " HTTP/1.0\r\nHost: " + request.host;
   if (!request.token.empty()) head += "\r\nAuthorization: Bearer " + request.token;

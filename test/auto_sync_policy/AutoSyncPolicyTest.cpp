@@ -21,9 +21,7 @@ TEST(AutoSyncPolicy, PullNeedsCredentials) {
   EXPECT_TRUE(shouldPullOnOpen(true, Status{}, kBook, false, kNow));
 }
 
-TEST(AutoSyncPolicy, NoPullWhenReturningFromSync) {
-  EXPECT_FALSE(shouldPullOnOpen(true, Status{}, kBook, true, kNow));
-}
+TEST(AutoSyncPolicy, NoPullWhenReturningFromSync) { EXPECT_FALSE(shouldPullOnOpen(true, Status{}, kBook, true, kNow)); }
 
 TEST(AutoSyncPolicy, SkipsPullRightAfterSuccessfulSync) {
   EXPECT_FALSE(shouldPullOnOpen(true, ok(kBook, kNow - 30), kBook, false, kNow));

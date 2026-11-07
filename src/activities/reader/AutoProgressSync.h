@@ -25,8 +25,7 @@ std::string statusText(const std::string& path);
 
 // Upload record for the local position, shared with the manual sync.
 KOReaderProgress buildUploadProgress(const std::string& documentHash, const SavedProgressPosition& localProgress,
-                                     const CrossPointPosition& localPosition, Epub* epub,
-                                     const std::string& epubPath);
+                                     const CrossPointPosition& localPosition, Epub* epub, const std::string& epubPath);
 
 // Blocking: joins the saved network if needed, pushes, and turns WiFi off again if it joined.
 bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& position);

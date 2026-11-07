@@ -43,8 +43,7 @@ std::string statusText(const std::string& path) {
 }
 
 KOReaderProgress buildUploadProgress(const std::string& documentHash, const SavedProgressPosition& localProgress,
-                                     const CrossPointPosition& localPosition, Epub* epub,
-                                     const std::string& epubPath) {
+                                     const CrossPointPosition& localPosition, Epub* epub, const std::string& epubPath) {
   KOReaderProgress progress;
   progress.document = documentHash;
   progress.progress = localProgress.xpath;

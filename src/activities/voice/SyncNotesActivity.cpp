@@ -96,6 +96,11 @@ void SyncNotesActivity::render(RenderLock&&) {
   renderer.clearScreen();
   renderer.drawCenteredText(UI_12_FONT_ID, renderer.getScreenHeight() / 2 - 20, "Sync Notes", true,
                             EpdFontFamily::BOLD);
-  renderer.drawCenteredText(UI_10_FONT_ID, renderer.getScreenHeight() / 2 + 20, message.c_str());
+  const auto lines = renderer.wrappedText(UI_10_FONT_ID, message.c_str(), renderer.getScreenWidth() - 40, 4);
+  int y = renderer.getScreenHeight() / 2 + 20;
+  for (const auto& line : lines) {
+    renderer.drawCenteredText(UI_10_FONT_ID, y, line.c_str());
+    y += renderer.getLineHeight(UI_10_FONT_ID);
+  }
   renderer.displayBuffer();
 }
