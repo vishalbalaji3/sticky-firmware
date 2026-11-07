@@ -798,7 +798,12 @@ void EpubReaderActivity::loop() {
   if (!atEndOfBook && SETTINGS.touchReaderControls && mappedInput.wasScreenLongPress(selectionX, selectionY)) {
     automaticPageTurnActive = false;
     pendingManualTurn = 0;
-    startClipSelection(selectionX, selectionY);
+    // A held picture opens full screen; taps keep the page-turn and menu zones.
+    if (openPictureAt(selectionX, selectionY)) {
+      haptic_feedback::touchAction();
+    } else {
+      startClipSelection(selectionX, selectionY);
+    }
     return;
   }
 
@@ -939,17 +944,6 @@ void EpubReaderActivity::loop() {
         haptic_feedback::touchAction();
         return;
       }
-    }
-  }
-
-  // Picture taps come next, but the centered menu tap still opens the menu over a full-page picture.
-  if (!atEndOfBook && SETTINGS.touchReaderControls && mappedInput.hasTouch() &&
-      !ReaderUtils::isTouchMenuTap(renderer, mappedInput)) {
-    int touchX = 0;
-    int touchY = 0;
-    if (mappedInput.wasScreenTapped(touchX, touchY) && openPictureAt(touchX, touchY)) {
-      haptic_feedback::touchAction();
-      return;
     }
   }
 

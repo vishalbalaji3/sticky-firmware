@@ -40,10 +40,13 @@ inline View layout(const int imageW, const int imageH, const int screenW, const 
           height};
 }
 
-// Pan for a new zoom level that keeps the image point under the screen center in place.
-// viewX is that axis' View offset at the old zoom; layout() clamps the result.
-inline int panForZoom(const int viewX, const int screenSize, const int oldZoom, const int newZoom) {
-  return (screenSize / 2 - viewX) * newZoom / oldZoom - screenSize / 2;
+// Pan for a new zoom level that moves the image point under screen position focus to the screen
+// center. viewX is that axis' View offset at the old zoom; layout() clamps the result.
+inline int panForZoom(const int viewX, const int focus, const int screenSize, const int oldZoom, const int newZoom) {
+  return (focus - viewX) * newZoom / oldZoom - screenSize / 2;
 }
+
+// A tap zooms in one step; at the top step it goes back to the whole picture.
+inline int tapZoom(const int zoom) { return zoom >= MAX_ZOOM ? 1 : zoom + 1; }
 
 }  // namespace picture_viewport
