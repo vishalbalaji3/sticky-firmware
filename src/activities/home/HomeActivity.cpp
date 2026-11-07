@@ -27,7 +27,7 @@
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 5;  // Library, Notes, Remote, Sync Notes, Settings
+  int count = 6;  // Library, Notes, Japanese, Remote, Sync Notes, Settings
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -321,6 +321,9 @@ void HomeActivity::loop() {
       case HomeMenuItem::NOTES:
         activityManager.goToNotes();
         break;
+      case HomeMenuItem::JAPANESE:
+        activityManager.goToCards();
+        break;
       case HomeMenuItem::REMOTE:
         activityManager.goToRemote();
         break;
@@ -527,8 +530,9 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_LIBRARY), "Notes", "Remote", "Sync Notes", tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Library, Bookmark, Transfer, Transfer, Settings};
+  std::vector<const char*> menuItems = {tr(STR_LIBRARY), "Notes",      "Japanese",
+                                        "Remote",        "Sync Notes", tr(STR_SETTINGS_TITLE)};
+  std::vector<UIIcon> menuIcons = {Library, Bookmark, Book, Transfer, Transfer, Settings};
 
   if (hasLibrarySlot()) {
     menuItems.insert(menuItems.begin() + 1, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));

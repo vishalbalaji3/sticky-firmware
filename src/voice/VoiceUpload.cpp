@@ -146,26 +146,68 @@ void pruneSentNotes() {
   }
 }
 
-void downloadTranscripts() {
-  Config config;
-  if (!loadConfig(config)) return;
-  const std::string temp = std::string(kTranscriptsPath) + ".tmp";
+namespace {
+
+bool downloadTo(const Config& config, const char* target, const char* path) {
+  const std::string temp = std::string(path) + ".tmp";
   HalFile file;
-  if (!Storage.openFileForWrite("VOICE", temp, file)) return;
+  if (!Storage.openFileForWrite("VOICE", temp, file)) return false;
   Request request;
   request.host = config.host;
-  request.target = "/api/v1/notes";
+  request.target = target;
   request.token = config.token;
   request.onBody = [&file](const uint8_t* data, const size_t size) { file.write(data, size); };
   const int status = secureRequest(request);
   file.close();
-  // Only a complete reply replaces the list, so a dropped connection keeps the old one.
-  if (status == 200) {
-    Storage.remove(kTranscriptsPath);
-    Storage.rename(temp.c_str(), kTranscriptsPath);
-  } else {
+  // Only a complete reply replaces the file, so a dropped connection keeps the old one.
+  if (status != 200) {
     Storage.remove(temp.c_str());
+    return false;
   }
+  Storage.remove(path);
+  return Storage.rename(temp.c_str(), path);
+}
+
+}  // namespace
+
+void downloadTranscripts() {
+  Config config;
+  if (loadConfig(config)) downloadTo(config, "/api/v1/notes", kTranscriptsPath);
+}
+
+void syncCardsAndHome() {
+  Config config;
+  if (!loadConfig(config)) return;
+
+  std::string pending;
+  bool reviewsSent = true;
+  if (Storage.exists(kReviewsPath) && readTextFile(kReviewsPath, pending, 256 * 1024) && !pending.empty()) {
+    std::string body = "{\"reviews\":[";
+    for (size_t start = 0; start < pending.size();) {
+      size_t end = pending.find('\n', start);
+      if (end == std::string::npos) end = pending.size();
+      if (start != 0) body += ',';
+      body.append(pending, start, end - start);
+      start = end + 1;
+    }
+    body += "]}";
+    Request request;
+    request.host = config.host;
+    request.method = "POST";
+    request.target = "/api/v1/reviews";
+    request.token = config.token;
+    request.contentType = "application/json";
+    request.bodyLength = body.size();
+    request.sendBody = [&body](freeink::SecureClient& c) {
+      return writeAll(c, reinterpret_cast<const uint8_t*>(body.data()), body.size());
+    };
+    reviewsSent = secureRequest(request) == 200;
+    // Ratings are kept until the server confirms them. A retry is safe, because it drops duplicates.
+    if (reviewsSent) Storage.remove(kReviewsPath);
+  }
+  // New cards wait until ratings land, or the same cards would be asked twice.
+  if (reviewsSent) downloadTo(config, "/api/v1/cards", kCardsPath);
+  downloadTo(config, "/api/v1/home", kHomePath);
 }
 
 }  // namespace voice

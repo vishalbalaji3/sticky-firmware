@@ -284,10 +284,10 @@ void CoverGridHomeUi::drawGrid(UiScreen& screen) {
 }
 
 void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
-  static constexpr const uint8_t* ICONS[] = {LibraryIcon,  BlocksIcon,   BookmarkIcon,
+  static constexpr const uint8_t* ICONS[] = {LibraryIcon,  BlocksIcon,   BookmarkIcon, BookIcon,
                                              TransferIcon, TransferIcon, Settings2Icon};
   int count = 0;
-  for (int i = 0; i < 6; ++i) {  // Library, OPDS, Notes, Remote, Sync Notes, Settings
+  for (int i = 0; i < 7; ++i) {  // Library, OPDS, Notes, Japanese, Remote, Sync Notes, Settings
     if (i == 1 && !hasOpds) continue;
     auto& tab = tabItems[count];
     tab.value = books->size() + count;

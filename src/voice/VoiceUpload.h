@@ -15,6 +15,13 @@ struct UploadResult {
 // Sends every waiting note. Requires Wi-Fi. A note leaves the queue only after the server confirms it.
 UploadResult uploadQueuedNotes();
 
+constexpr const char* kCardsPath = "/.sticky/cards.json";
+constexpr const char* kReviewsPath = "/.sticky/reviews.jsonl";
+constexpr const char* kHomePath = "/.sticky/home.json";
+
+// Sends offline ratings, then downloads new cards and lock screen data. Failures leave the old files.
+void syncCardsAndHome();
+
 // Saves recent transcripts to the card for the Notes app.
 void downloadTranscripts();
 

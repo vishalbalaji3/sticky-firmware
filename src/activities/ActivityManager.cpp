@@ -16,6 +16,7 @@
 #include "HapticFeedback.h"
 #include "OpdsServerStore.h"
 #include "activities/remote/RemoteActivity.h"
+#include "activities/voice/CardsActivity.h"
 #include "activities/voice/NotesActivity.h"
 #include "activities/voice/SyncNotesActivity.h"
 #include "boot_sleep/BootActivity.h"
@@ -317,6 +318,8 @@ void ActivityManager::goToLibrary() {
 void ActivityManager::goToSyncNotes() { replaceActivity(std::make_unique<SyncNotesActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToNotes() { replaceActivity(std::make_unique<NotesActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToCards() { replaceActivity(std::make_unique<CardsActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToRemote() { replaceActivity(std::make_unique<RemoteActivity>(renderer, mappedInput)); }
 

@@ -59,7 +59,10 @@ void SyncNotesActivity::syncNow() {
   voice::pruneSentNotes();
   // Fresh uploads need a moment to transcribe, so wait briefly for them to appear in the list.
   if (result.uploaded > 0) delay(6000);
-  if (!result.unconfigured && !result.unreachable && !result.unauthorized) voice::downloadTranscripts();
+  if (!result.unconfigured && !result.unreachable && !result.unauthorized) {
+    voice::downloadTranscripts();
+    voice::syncCardsAndHome();
+  }
 
   if (result.unconfigured) {
     message = "Add /.sticky/config.json to the card first.";

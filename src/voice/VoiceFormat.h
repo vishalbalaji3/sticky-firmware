@@ -93,6 +93,19 @@ inline bool sentFileExpired(const char* name, uint32_t now) {
   return now > sentAt && now - sentAt > kKeepSentSeconds;
 }
 
+// Open-Meteo's WMO weather codes, in as few words as the lock screen has room for.
+inline const char* weatherLabel(const int code) {
+  if (code == 0) return "Clear";
+  if (code <= 2) return "Partly cloudy";
+  if (code == 3) return "Cloudy";
+  if (code <= 48) return "Fog";
+  if (code <= 57) return "Drizzle";
+  if (code <= 67 || (code >= 80 && code <= 82)) return "Rain";
+  if (code <= 77 || code == 85 || code == 86) return "Snow";
+  if (code >= 95) return "Storms";
+  return "";
+}
+
 // Parses "HTTP/1.1 200 OK" and returns the status, or -1.
 inline int parseHttpStatus(const std::string& head) {
   if (head.rfind("HTTP/", 0) != 0) return -1;

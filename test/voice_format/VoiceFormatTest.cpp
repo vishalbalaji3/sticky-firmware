@@ -56,6 +56,18 @@ TEST(Sent, ExpiresOnlyAfterThirtyDaysWithAKnownClock) {
   EXPECT_FALSE(sentFileExpired("-abc.wav", sent * 2));
 }
 
+TEST(Weather, CoversEveryKnownRange) {
+  EXPECT_STREQ("Clear", weatherLabel(0));
+  EXPECT_STREQ("Cloudy", weatherLabel(3));
+  EXPECT_STREQ("Fog", weatherLabel(45));
+  EXPECT_STREQ("Rain", weatherLabel(61));
+  EXPECT_STREQ("Rain", weatherLabel(81));
+  EXPECT_STREQ("Snow", weatherLabel(75));
+  EXPECT_STREQ("Snow", weatherLabel(86));
+  EXPECT_STREQ("Storms", weatherLabel(95));
+  EXPECT_STREQ("", weatherLabel(90));
+}
+
 TEST(Http, ParsesStatusLines) {
   EXPECT_EQ(200, parseHttpStatus("HTTP/1.1 200 OK\r\n"));
   EXPECT_EQ(413, parseHttpStatus("HTTP/2 413 \r\n"));

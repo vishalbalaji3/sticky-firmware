@@ -22,7 +22,7 @@ namespace voice {
 struct Place;
 }
 
-enum class HomeMenuItem { NONE, LIBRARY, OPDS_BROWSER, NOTES, REMOTE, SYNC_NOTES, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, LIBRARY, OPDS_BROWSER, NOTES, JAPANESE, REMOTE, SYNC_NOTES, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -98,6 +98,7 @@ class ActivityManager {
   void goToBrowser();
   void goToSyncNotes();
   void goToNotes();
+  void goToCards();
   void goToRemote();
   void fillVoicePlace(voice::Place& place);
   void notifyVoiceNoteSaved();

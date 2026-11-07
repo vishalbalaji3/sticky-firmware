@@ -47,6 +47,8 @@ class HomeActivity final : public Activity {
     if (hasOpdsUrl) ++i;
     if (item == HomeMenuItem::NOTES) return i;
     ++i;
+    if (item == HomeMenuItem::JAPANESE) return i;
+    ++i;
     if (item == HomeMenuItem::REMOTE) return i;
     ++i;
     if (item == HomeMenuItem::SYNC_NOTES) return i;
@@ -61,6 +63,7 @@ class HomeActivity final : public Activity {
     if (idx == i++) return HomeMenuItem::LIBRARY;
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
     if (idx == i++) return HomeMenuItem::NOTES;
+    if (idx == i++) return HomeMenuItem::JAPANESE;
     if (idx == i++) return HomeMenuItem::REMOTE;
     if (idx == i++) return HomeMenuItem::SYNC_NOTES;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;

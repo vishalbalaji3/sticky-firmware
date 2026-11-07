@@ -1,5 +1,6 @@
 #include "SleepActivity.h"
 
+#include <ArduinoJson.h>
 #include <BitmapHelpers.h>
 #include <BmpToBmpConverter.h>
 #include <Epub.h>
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <limits>
 #include <string>
@@ -30,6 +32,9 @@
 #include "fontIds.h"
 #include "images/Logo120.h"
 #include "images/MoonIcon.h"
+#include "voice/SecureRequest.h"
+#include "voice/VoiceFormat.h"
+#include "voice/VoiceUpload.h"
 
 namespace {
 // Metalio: B/W sleep images use the full 0xF7 waveform instead of HALF (two
@@ -686,6 +691,10 @@ void releaseSdFontCachesForDecode(const GfxRenderer& renderer) {
 void SleepActivity::onEnter() {
   Activity::onEnter();
 
+#if FREEINK_DEVICE_STICKY
+  return renderLockScreen();
+#endif
+
   const bool renderQuickResume =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
       (fromTimeout &&
@@ -799,6 +808,42 @@ bool SleepActivity::renderCustomSleepBmp(const std::string& path) const {
   if (bitmap.parseHeaders() != BmpReaderError::Ok) return false;
   renderBitmapSleepScreen(bitmap);
   return true;
+}
+
+// Wallpaper from /sleep.bmp with today's details, as of the last sync. Times are left out on purpose:
+// nothing redraws the screen during sleep yet, so a clock would show the wrong time and look right.
+void SleepActivity::renderLockScreen() const {
+  const bool hasWallpaper = Storage.exists("/sleep.bmp") && renderCustomSleepBmp("/sleep.bmp");
+  if (!hasWallpaper) renderer.clearScreen();
+
+  std::string details;
+  std::string text;
+  JsonDocument doc;
+  if (voice::readTextFile(voice::kHomePath, text) && !deserializeJson(doc, text)) {
+    if (!doc["weather"].isNull()) {
+      details += std::to_string(doc["weather"]["temperature"].as<int>()) + "\xC2\xB0" + (doc["weather"]["unit"] | "F") +
+                 " " + voice::weatherLabel(doc["weather"]["code"].as<int>());
+    }
+    if (!doc["cardsDue"].isNull() && doc["cardsDue"].as<int>() > 0) {
+      if (!details.empty()) details += "   ";
+      details += std::to_string(doc["cardsDue"].as<int>()) + " cards due";
+    }
+  }
+
+  char date[40] = "";
+  const time_t now = time(nullptr);
+  if (now >= voice::kFirstValidUnixTime) {
+    struct tm today;
+    localtime_r(&now, &today);
+    strftime(date, sizeof(date), "%A, %B %-d", &today);
+  }
+
+  const int width = renderer.getScreenWidth();
+  renderer.fillRect(0, 0, width, 110, false);
+  renderer.drawLine(0, 110, width, 110);
+  if (date[0]) renderer.drawCenteredText(UI_12_FONT_ID, 26, date, true, EpdFontFamily::BOLD);
+  if (!details.empty()) renderer.drawCenteredText(UI_10_FONT_ID, 66, details.c_str());
+  renderer.displayBuffer(kSleepClean);
 }
 
 void SleepActivity::renderCustomSleepScreen() const {
