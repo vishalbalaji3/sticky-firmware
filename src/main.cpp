@@ -706,7 +706,9 @@ void setup() {
       // With Short Power Button Press = Sleep, a single click wakes on any
       // device; otherwise the button must still be held (ghost-wake debounce).
       // Picco: plugging in USB pulses the wake line; power on, as stock does.
-      if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP &&
+      // Sticky: a click wakes (its click is "home", so shortPwrBtn is IGNORE there); holding is for voice.
+      if (!FREEINK_DEVICE_STICKY && !wakeHoldVerified &&
+          SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP &&
           !(FREEINK_DEVICE_PICCO && gpio.isUsbConnected())) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
