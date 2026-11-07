@@ -163,11 +163,18 @@ void pumpRecording() {
 
 bool recordingFull() { return recording && dataBytes >= kMaxDataBytes; }
 
-void stopRecording() {
-  if (!recording) return;
+bool stopRecording() {
+  if (!recording) return false;
   releaseCapture();
   pumpRecording();
   recording = false;
+  if (dataBytes < kSampleRate * sizeof(int16_t)) {  // Under a second: an accidental hold, which transcribes as ".".
+    audioFile.close();
+    Storage.remove(audioPath.c_str());
+    Storage.remove((std::string(kNotesDir) + "/" + clientId + ".json").c_str());
+    LOG_INF("VOICE", "Discarded %s: under a second", clientId.c_str());
+    return false;
+  }
   const bool headerOk = writeHeader(audioFile, dataBytes);
   audioFile.close();
   // Kept as .part on failure, so recoverInterruptedNotes() can try again.
@@ -176,6 +183,7 @@ void stopRecording() {
   }
   LOG_INF("VOICE", "Saved %s: %lu bytes, %u samples dropped", clientId.c_str(), static_cast<unsigned long>(dataBytes),
           static_cast<unsigned>(ring.dropped()));
+  return true;
 }
 
 void recoverInterruptedNotes() {

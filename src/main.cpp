@@ -1034,8 +1034,7 @@ void loop() {
       lastActivityTime = millis();
       voice::pumpRecording();
       if (!powerDown || voice::recordingFull()) {
-        voice::stopRecording();
-        activityManager.notifyVoiceNoteSaved();
+        if (voice::stopRecording()) activityManager.notifyVoiceNoteSaved();
       }
     } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS &&
                WiFi.getMode() == WIFI_MODE_NULL) {

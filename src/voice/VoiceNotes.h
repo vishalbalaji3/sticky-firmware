@@ -30,7 +30,8 @@ void pumpRecording();
 // True once a note reaches the size the cloud API accepts.
 bool recordingFull();
 // Finishes the file and makes the note ready to upload.
-void stopRecording();
+// Returns false when the note was too short to keep (e.g. the hold that woke the device) and was deleted.
+bool stopRecording();
 
 // Repairs notes interrupted by power loss, so their audio can still upload.
 void recoverInterruptedNotes();
