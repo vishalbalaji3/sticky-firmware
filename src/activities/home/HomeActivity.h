@@ -21,7 +21,7 @@ class HomeActivity final : public Activity {
   bool hasPlugins = false;
   // The home "library" slot (index 2) shows Plugins when any plugin is
   // installed, otherwise OPDS. The index converters gate on its presence.
-  bool hasLibrarySlot() const { return hasPlugins || hasOpdsServers; }
+  bool hasLibrarySlot() const { return hasPlugins; }  // OPDS lives behind Library
   bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
@@ -49,10 +49,6 @@ class HomeActivity final : public Activity {
     ++i;
     if (item == HomeMenuItem::JAPANESE) return i;
     ++i;
-    if (item == HomeMenuItem::REMOTE) return i;
-    ++i;
-    if (item == HomeMenuItem::SYNC_NOTES) return i;
-    ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     return 0;
   }
@@ -64,8 +60,6 @@ class HomeActivity final : public Activity {
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
     if (idx == i++) return HomeMenuItem::NOTES;
     if (idx == i++) return HomeMenuItem::JAPANESE;
-    if (idx == i++) return HomeMenuItem::REMOTE;
-    if (idx == i++) return HomeMenuItem::SYNC_NOTES;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }

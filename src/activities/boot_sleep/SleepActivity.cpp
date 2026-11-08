@@ -8,6 +8,7 @@
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalStorage.h>
@@ -840,11 +841,12 @@ void SleepActivity::renderLockScreen() const {
     }
   }
 
+  // The battery-backed RTC first: the system clock is lost on every reset until the next sync.
   char date[40] = "";
+  struct tm today;
   const time_t now = time(nullptr);
-  if (now >= voice::kFirstValidUnixTime) {
-    struct tm today;
-    localtime_r(&now, &today);
+  if ((halClock.localTime(today) && today.tm_year >= 124) ||
+      (now >= voice::kFirstValidUnixTime && localtime_r(&now, &today))) {
     strftime(date, sizeof(date), "%A, %B %-d", &today);
   }
 

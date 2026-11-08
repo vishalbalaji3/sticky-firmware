@@ -142,7 +142,7 @@ void NotesActivity::recheckTranscripts() {
 
 void NotesActivity::finishSync() {
   sync = Sync::Idle;
-  // Off even if it was on before, as Sync Notes does: the recorder needs it off.
+  // Off even if it was on before: the recorder needs it off.
   if (WiFi.getMode() != WIFI_MODE_NULL) stopWifi();
 }
 

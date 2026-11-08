@@ -15,10 +15,8 @@
 #include "CrossPointSettings.h"
 #include "HapticFeedback.h"
 #include "OpdsServerStore.h"
-#include "activities/remote/RemoteActivity.h"
 #include "activities/voice/CardsActivity.h"
 #include "activities/voice/NotesActivity.h"
-#include "activities/voice/SyncNotesActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -335,13 +333,10 @@ void ActivityManager::goToLibrary() {
   replaceActivity(std::move(activity));
 }
 
-void ActivityManager::goToSyncNotes() { replaceActivity(std::make_unique<SyncNotesActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToNotes() { replaceActivity(std::make_unique<NotesActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToCards() { replaceActivity(std::make_unique<CardsActivity>(renderer, mappedInput)); }
-
-void ActivityManager::goToRemote() { replaceActivity(std::make_unique<RemoteActivity>(renderer, mappedInput)); }
 
 void ActivityManager::fillVoicePlace(voice::Place& place) {
   RenderLock lock;
@@ -424,7 +419,9 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
     } else if (activityName == "Library") {
       initialMenuItem = HomeMenuItem::LIBRARY;
-    } else if (activityName == "OpdsBookBrowser" || activityName == "PluginCatalog") {
+    } else if (activityName == "OpdsBookBrowser") {
+      initialMenuItem = HomeMenuItem::LIBRARY;
+    } else if (activityName == "PluginCatalog") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
     } else if (activityName == "CrossPointWebServer") {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;

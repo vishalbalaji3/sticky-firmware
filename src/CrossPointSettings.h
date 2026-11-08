@@ -329,7 +329,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Auto-sleep timeout setting (default 10 minutes). Legacy sleepTimeout enum values are migration-only.
   uint8_t sleepTimeoutMinutes = 10;
   // E-ink refresh frequency (default 15 pages)
+#if FREEINK_DEVICE_STICKY
+  uint8_t refreshFrequency = REFRESH_5;  // Panel makers advise a full refresh every 5-10 partial ones.
+#else
   uint8_t refreshFrequency = REFRESH_15;
+#endif
   uint8_t hyphenationEnabled = 0;
 
   // Reader screen margin settings

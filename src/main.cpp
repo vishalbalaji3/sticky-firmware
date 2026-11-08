@@ -686,6 +686,8 @@ void setup() {
   SETTINGS.loadFromFile();
 #if FREEINK_DEVICE_STICKY
   SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::IGNORE;  // loop() handles this button itself.
+  // shortcut: moves cards still on the old default to every 5 pages, so choosing 15 in Settings won't stick.
+  if (SETTINGS.refreshFrequency == CrossPointSettings::REFRESH_15) SETTINGS.refreshFrequency = CrossPointSettings::REFRESH_5;
 #endif
   // Push the saved timezone's POSIX rule into the clock (migrating the legacy
   // UTC-offset setting on first boot after the update).
@@ -885,7 +887,7 @@ void loop() {
   static unsigned long lastMemPrint = 0;
 
 #if FREEINK_DEVICE_STICKY
-  // The third button is ours: a click goes home and a hold records. Confirm comes from touch.
+  // The third button is ours: a click goes back one level and a hold records. Confirm comes from touch.
   gpio.setSharedConfirmPowerShortPressEmitsPower(true);
 #else
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
@@ -1081,7 +1083,7 @@ void loop() {
     if (!powerDown) {
       if (mappedInputManager.wasReleased(MappedInputManager::Button::Power) && releasedSinceWake && !holdConsumed &&
           !activityManager.isForegroundHomeShown()) {
-        activityManager.goHome();
+        mappedInputManager.injectBackClick();  // one level up; each screen's Back decides where that is
       }
       releasedSinceWake = true;
       holdConsumed = false;

@@ -24,6 +24,7 @@
 #include "LcpPassphraseStore.h"
 #include "MappedInputManager.h"
 #include "OpdsTokenStore.h"
+#include "activities/ActivityManager.h"
 #include "activities/util/DetailsActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
@@ -308,7 +309,19 @@ void OpdsBookBrowserActivity::startBrowse() {
   fetchFeed(currentPath);
 }
 
-void OpdsBookBrowserActivity::downloadFinished(bool) {
+#if FREEINK_DEVICE_STICKY
+void OpdsBookBrowserActivity::wifiSelectionCancelled() { activityManager.goToLibrary(); }
+#endif
+
+void OpdsBookBrowserActivity::downloadFinished(bool cancelled) {
+#if FREEINK_DEVICE_STICKY
+  // The catalog is the Sticky's library: a fetched book opens straight away.
+  if (!cancelled && !openAfterDownload.empty()) {
+    activityManager.goToReader(openAfterDownload);
+    return;
+  }
+#endif
+  (void)cancelled;
   // Reload the released catalog (entries were freed for the TLS session).
   startBrowse();
 }
@@ -530,6 +543,14 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     downloadLcpBook(book);
     return;
   }
+#if FREEINK_DEVICE_STICKY
+  // A book already on the card opens instead of downloading a second copy.
+  openAfterDownload = downloadDestination(book);
+  if (Storage.exists(openAfterDownload.c_str())) {
+    activityManager.goToReader(openAfterDownload);
+    return;
+  }
+#endif
   beginDownload(book.title);
 
   // Build full download URL relative to the current feed, not the root server URL

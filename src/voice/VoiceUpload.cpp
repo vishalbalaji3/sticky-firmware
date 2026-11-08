@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <SecureClient.h>
@@ -177,9 +178,11 @@ bool downloadTranscripts() {
 }
 
 UploadResult syncNotes(bool& transcriptsSaved) {
-  // Sets the clock for capture times and for expiring old audio.
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  for (int i = 0; i < 50 && time(nullptr) < kFirstValidUnixTime; ++i) delay(100);
+  // Sets the clock for capture times, expiring old audio and the lock screen date. The RTC copy survives resets.
+  if (!halClock.syncFromNTP()) {
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    for (int i = 0; i < 50 && time(nullptr) < kFirstValidUnixTime; ++i) delay(100);
+  }
   timezones::applyToClock();  // configTime() replaced the zone the rest of the UI displays in.
 
   const UploadResult result = uploadQueuedNotes();

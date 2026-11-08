@@ -34,7 +34,7 @@ git checkout sticky-os && git submodule update --init   # SDK is our fork: visha
   - Requests use HTTP/1.0 to avoid chunked bodies.
 - **SD and the e-paper share one SPI bus (SCK13/MOSI14).** Voice capture goes through a PSRAM ring on core 0, so display refreshes don't drop samples. 0 dropped has been verified.
 - **Buttons: Up GPIO5, Down GPIO6, third button GPIO4 (power, AI and confirm in one).**
-  - A click goes home, and wakes from sleep. Holding records. Up+Down locks.
+  - A click is Back (one level up; injected as a Back click in `main.cpp`), and wakes from sleep. Holding records. Up+Down locks.
   - `shortPwrBtn` is forced to IGNORE on the Sticky, so the stock ghost-wake hold check is skipped there.
 - **Deep-sleep wake is a full reboot.** Anything that must react to a held button (hold-to-record from sleep) has to act early in `setup()`.
 - **Battery gauge BQ27220 0x55 on Wire1 (SDA1/SCL0), shared with PCF8563 RTC 0x51, SHT40 0x44, LSM6DS3 0x6A.** Touch (GT911) is on its own bus (SDA3/SCL2).
@@ -43,7 +43,6 @@ git checkout sticky-os && git submodule update --init   # SDK is our fork: visha
 
 These are new files where possible:
 - Voice notes: `src/voice/`, `src/activities/voice/`.
-- TV remote: `src/activities/remote/`.
 - Automatic reading sync: `src/activities/reader/AutoProgressSync.*` and `AutoSyncPolicy.h`.
 - Picture viewer: `src/activities/reader/PictureViewerActivity.*` and `PictureViewport.h`.
 - Sleep and lock: `SleepWakePolicy.h`, `SleepActivity::drawAsleepMarker`.
@@ -56,12 +55,12 @@ On-card config is `/.sticky/config.json` (`host`, device `token`, `tvHost`). `/.
   Pending transcripts are checked up to four more times, five seconds apart. Wi-Fi turns off
   when sync finishes, when a note opens, and when Notes closes. Sync waits for an active
   recording to stop. Offline notes stay readable.
-- **Sync Notes** stays on the launcher for Japanese cards, lock-screen data, and network selection.
+- There is no Sync Notes screen. **Japanese** syncs ratings, cards and lock-screen data on open, the same way. Library opens the OPDS catalog; a book already on the card opens instead of downloading again.
 - Auto-sleep keeps the current page and adds only a moon beside its existing battery.
   Holding the third button from sleep starts capture early; the recording dot is part of the first paint.
 - On picture pages, taps keep the normal page-turn and menu zones. Hold a picture to open
   the viewer. Tap to zoom 1x → 2x → 3x → 1x around the tapped point, drag to pan, or use
-  Up/Down to zoom. The X returns to the same page; the third button still goes home or records.
+  Up/Down to zoom. The X returns to the same page; the third button goes back or records.
 - Reading sync tries saved networks in range, strongest first. Before an exit push it checks
   remote progress and preserves any further position, because client IDs are shared across units.
   Failed reads skip the push. Use manual sync to deliberately replace a further remote position.
@@ -70,3 +69,5 @@ On-card config is `/.sticky/config.json` (`host`, device `token`, `tvHost`). `/.
 
 The combined build needs owner checks for these behaviors, including picture controls in all
 four orientations and recording after leaving Notes. A passing build is not a device test.
+
+Japanese cards use the selected reader font, targeting 18 pt for questions and answers; progress and rating controls keep their smaller UI fonts.

@@ -53,6 +53,8 @@ class MappedInputManager {
 #endif
   bool injectRemoteClick(RemoteButton button);
   bool hasRemoteClick() const { return remoteInput.button != RemoteButton::None; }
+  // Sticky's third button: a click is Back for this frame, even though a physical release happened.
+  void injectBackClick() const { remoteInput.click(RemoteButton::Back); }
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
   // One-shot threshold event while the button is down; consumes its release.

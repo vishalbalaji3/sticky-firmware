@@ -22,7 +22,7 @@ namespace voice {
 struct Place;
 }
 
-enum class HomeMenuItem { NONE, LIBRARY, OPDS_BROWSER, NOTES, JAPANESE, REMOTE, SYNC_NOTES, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, LIBRARY, OPDS_BROWSER, NOTES, JAPANESE, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -99,10 +99,8 @@ class ActivityManager {
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();
-  void goToSyncNotes();
   void goToNotes();
   void goToCards();
-  void goToRemote();
   void fillVoicePlace(voice::Place& place);
   void notifyVoiceNoteSaved();
   // E-paper is too slow to confirm recording quickly, so capture is already running when this appears.

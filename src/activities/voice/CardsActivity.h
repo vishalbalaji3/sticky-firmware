@@ -10,7 +10,9 @@ class CardsActivity final : public Activity {
  public:
   CardsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput) : Activity("Cards", renderer, mappedInput) {}
   void onEnter() override;
+  void onExit() override;
   void loop() override;
+  bool preventAutoSleep() override { return syncPending; }
   void render(RenderLock&&) override;
 
  private:
@@ -22,8 +24,11 @@ class CardsActivity final : public Activity {
   };
 
   void rate(int rating);
+  void loadCards();
+  void syncNow();
 
   std::vector<Card> cards;
   size_t index = 0;
   bool revealed = false;
+  bool syncPending = true;  // Opening syncs over a saved network, after the cached cards are on screen.
 };

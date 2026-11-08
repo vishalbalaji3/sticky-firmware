@@ -66,6 +66,7 @@ class OpdsBookBrowserActivity final : public CatalogActivity {
   // (removed when the page closes).
   OpdsEntry detailBook;
   std::string detailCoverPath;
+  std::string openAfterDownload;  // Sticky: the book to open once its download lands
   // Raw search URL template ({searchTerms} or RFC 6570 {?query} style),
   // either inlined in the feed or fetched from an OpenSearch description.
   std::string searchTemplate;
@@ -94,6 +95,9 @@ class OpdsBookBrowserActivity final : public CatalogActivity {
   void drawFooter() override;
   void startBrowse() override;
   void downloadFinished(bool cancelled) override;
+#if FREEINK_DEVICE_STICKY
+  void wifiSelectionCancelled() override;  // offline: the books already on the card
+#endif
   void performSearch(const std::string& query) override;
   void onBackButton() override;
   // Pagination side buttons; everything else
