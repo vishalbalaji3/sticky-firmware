@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "activities/reader/AutoSyncPolicy.h"
+#include "network/SavedWifi.h"
 
 using namespace autosync;
 
@@ -59,4 +60,22 @@ TEST(AutoSyncPolicy, StatusText) {
   EXPECT_EQ("Synced 2 min ago", statusText(true, ok(kBook, kNow - 150), kBook, kNow));
   EXPECT_EQ("Synced 3 h ago", statusText(true, ok(kBook, kNow - 3 * 3600 - 10), kBook, kNow));
   EXPECT_EQ("Synced 2 d ago", statusText(true, ok(kBook, kNow - 2 * 86400), kBook, kNow));
+}
+
+// Offline reading here, then Readest read further, then the book is left online: keep Readest's position.
+TEST(AutoSyncPolicy, ExitPushNeverOverwritesFurtherRemote) {
+  EXPECT_FALSE(shouldPushOverRemote(true, true, false, 0.60f, 0.45f));
+  EXPECT_TRUE(shouldPushOverRemote(true, true, false, 0.40f, 0.45f));  // ours is further
+  EXPECT_TRUE(shouldPushOverRemote(true, true, false, 0.45f, 0.45f));
+  EXPECT_TRUE(shouldPushOverRemote(true, true, true, 0.60f, 0.45f));     // our own older record: going back is allowed
+  EXPECT_TRUE(shouldPushOverRemote(true, false, false, 0.0f, 0.45f));    // nothing stored yet
+  EXPECT_FALSE(shouldPushOverRemote(false, false, false, 0.0f, 0.45f));  // remote unknown
+}
+
+TEST(SavedWifiOrder, SavedInRangeStrongestFirstOncePerSsid) {
+  const std::vector<ScannedNetwork> scan = {
+      {"cafe", -40}, {"home", -70}, {"phone", -55}, {"home", -60}, {"neighbour", -30}};
+  EXPECT_EQ((std::vector<size_t>{2, 3}), savedJoinOrder(scan, {"home", "phone", "office"}));
+  EXPECT_TRUE(savedJoinOrder(scan, {"office"}).empty());
+  EXPECT_TRUE(savedJoinOrder({}, {"home"}).empty());
 }

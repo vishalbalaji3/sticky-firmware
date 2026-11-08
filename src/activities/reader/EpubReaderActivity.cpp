@@ -1354,13 +1354,13 @@ bool EpubReaderActivity::autoPullOnOpen() {
   if (!autosync::shouldPullOnOpen(bookPath)) return false;
   {
     RenderLock lock(*this);  // the saved networks are read from the card, which shares SPI with the display
-    if (!hasLastSavedWifi()) {
+    if (!hasSavedWifi()) {
       autosync::record(bookPath, false);
       return false;
     }
     GUI.drawPopup(renderer, "Syncing progress...");
   }
-  if (joinLastSavedWifi(autosync::kJoinTimeoutMs)) {
+  if (joinSavedWifi(autosync::kJoinTimeoutMs)) {
     launchKOReaderSync(/*automatic=*/true);
     if (leavingForSync) return true;  // otherwise saving progress failed and the reader stays
   }

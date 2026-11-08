@@ -84,6 +84,9 @@ class KOReaderSyncClient {
     USER_EXISTS
   };
 
+  // Sent with every upload, so a pulled record shows whether this device wrote it.
+  static constexpr char DEVICE_ID[] = "crosspoint-reader";
+
   /**
    * Authenticate with the sync server (validate credentials).
    * @return OK on success, error code on failure

@@ -44,6 +44,16 @@ inline bool shouldPushOnExit(const bool hasCredentials, const int openSpine, con
   return hasCredentials && openSpine >= 0 && (spine != openSpine || page != openPage);
 }
 
+// The server keeps the last write, so the exit push reads the remote position first. Skip only when
+// another device's position is further than ours: pushing would lose that reading, and skipping loses
+// nothing, because the local position stays on the card and the next open's pull compares the two.
+// An unreadable remote also skips, since it may hold such a position.
+inline bool shouldPushOverRemote(const bool remoteRead, const bool remoteExists, const bool remoteIsOwn,
+                                 const float remotePercentage, const float localPercentage) {
+  if (!remoteRead) return false;
+  return !remoteExists || remoteIsOwn || remotePercentage <= localPercentage;
+}
+
 inline std::string statusText(const bool hasCredentials, const Status& status, const uint32_t key, const int64_t now) {
   if (!hasCredentials) return "Sync off (set up in Settings)";
   if (status.bookKey != key || (status.result != Result::Ok && status.result != Result::Pushed)) return "Not synced";
