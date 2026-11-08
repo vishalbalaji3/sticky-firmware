@@ -14,6 +14,7 @@
 #include <WiFi.h>
 
 #include "activities/reader/AutoProgressSync.h"
+#include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/SavedWifi.h"
 #include "network/WifiPowerSaveGuard.h"
@@ -42,6 +43,14 @@ void CardsActivity::onEnter() {
 }
 
 void CardsActivity::onExit() {
+  // Ratings go up on leaving (Back or sleep), like the reader's exit push. ActivityManager holds the render lock.
+  if (Storage.exists(voice::kReviewsPath) && !voice::isRecording()) {
+    GUI.drawPopup(renderer, "Syncing cards...");
+    if (WiFi.status() == WL_CONNECTED || (hasSavedWifi() && joinSavedWifi(autosync::kJoinTimeoutMs))) {
+      WifiPowerSaveGuard psGuard;
+      voice::syncCardsAndHome();
+    }
+  }
   if (WiFi.getMode() != WIFI_MODE_NULL) stopWifi();
   Activity::onExit();
 }
