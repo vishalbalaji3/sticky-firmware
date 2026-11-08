@@ -188,6 +188,7 @@ UploadResult syncNotes(bool& transcriptsSaved) {
   const UploadResult result = uploadQueuedNotes();
   pruneSentNotes();
   transcriptsSaved = !result.unconfigured && !result.unreachable && !result.unauthorized && downloadTranscripts();
+  if (transcriptsSaved) syncHome();  // The lock screen design and wallpaper ride along on Notes' Wi-Fi.
   return result;
 }
 

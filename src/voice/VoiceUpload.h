@@ -34,7 +34,7 @@ bool downloadTranscripts();
 // Deletes sent audio past its retention period.
 void pruneSentNotes();
 
-// Requires Wi-Fi: sets the clock, uploads waiting notes, prunes sent audio and downloads transcripts.
+// Requires Wi-Fi: sets the clock, uploads waiting notes, prunes sent audio, downloads transcripts and lock screen data.
 // transcriptsSaved reports whether the transcript file was refreshed.
 UploadResult syncNotes(bool& transcriptsSaved);
 

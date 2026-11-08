@@ -45,7 +45,6 @@
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "activities/reader/AutoProgressSync.h"
 #include "network/SavedWifi.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
@@ -481,11 +480,9 @@ void enterDeepSleep(bool fromTimeout = false) {
 #if FREEINK_DEVICE_STICKY
   const bool isQuickResumeSleep =
       sleepwake::stickyScreenFor(fromTimeout, APP_STATE.lastSleepFromReader) == sleepwake::StickyScreen::KeepFrame;
-  // Fresh weather and the design or wallpaper last applied in the PWA, before the lock screen draws.
-  if (!isQuickResumeSleep && !voice::isRecording() && powerManager.getBatteryPercentage() >= 20 &&
-      (WiFi.status() == WL_CONNECTED || (hasSavedWifi() && joinSavedWifi(autosync::kJoinTimeoutMs)))) {
-    voice::syncHome();
-  }
+  // Picks up a design applied in the PWA, but only on Wi-Fi that is already up: a join here delayed every lock by
+  // up to 8 s. Notes and Japanese fetch it whenever they sync.
+  if (!isQuickResumeSleep && !voice::isRecording() && WiFi.status() == WL_CONNECTED) voice::syncHome();
 #else
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||

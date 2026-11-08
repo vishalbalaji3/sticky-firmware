@@ -57,7 +57,8 @@ On-card config is `/.sticky/config.json` (`host`, device `token`, `tvHost`). `/.
   recording to stop. Offline notes stay readable.
 - There is no Sync Notes screen. **Japanese** syncs ratings, cards and lock-screen data on open, the same way. Library opens the OPDS catalog; a book already on the card opens instead of downloading again.
 - Auto-sleep in a book keeps the current page and adds only a moon beside its existing battery. Anywhere else it
-  shows the lock screen, refreshing `/.sticky/home.json` (and `/sleep.bmp` when the PWA applied a new wallpaper) first.
+  shows the lock screen. Notes and Japanese syncs refresh `/.sticky/home.json` (and `/sleep.bmp` when the PWA applied
+  a new wallpaper); locking refreshes it only if Wi-Fi is already connected, never joining a network itself.
   Holding the third button from sleep starts capture early; the recording dot is part of the first paint.
 - On picture pages, taps keep the normal page-turn and menu zones. Hold a picture to open
   the viewer. Tap to zoom 1x → 2x → 3x → 1x around the tapped point, drag to pan, or use
