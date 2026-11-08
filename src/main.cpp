@@ -849,11 +849,19 @@ void setup() {
   } else if (!sleepwake::wakeReopensBook(!APP_STATE.openEpubPath.empty(), APP_STATE.lastSleepFromReader,
                                          mappedInputManager.isPressed(MappedInputManager::Button::Back),
                                          APP_STATE.readerActivityLoadCount > 0)) {
-    // Boot to the app it slept in (home if none), unless Back is held. The book is skipped if none is open, the
-    // last sleep was outside the reader, or the reader crashed (readerActivityLoadCount > 0).
-    const auto app = mappedInputManager.isPressed(MappedInputManager::Button::Back)
-                         ? sleepwake::WakeApp::Home
-                         : sleepwake::wakeAppFor(APP_STATE.sleptInApp);
+    // A sleep wake returns to the app it slept in (home if none), unless Back is held. The book is skipped if none
+    // is open, the last sleep was outside the reader, or the reader crashed (readerActivityLoadCount > 0).
+    const auto app =
+        resume != BootResume::SplashlessWake || mappedInputManager.isPressed(MappedInputManager::Button::Back)
+            ? sleepwake::WakeApp::Home
+            : sleepwake::wakeAppFor(APP_STATE.sleptInApp);
+    if (app != sleepwake::WakeApp::Home) {
+      // Used once, so an app that crashes or hangs on open cannot pull every later boot back into it.
+      APP_STATE.sleptInApp.clear();
+      APP_STATE.saveToFile();
+      // The lock screen's gray wallpaper would ghost under the app's fast first paint.
+      if (needsWakeRefresh) renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH);
+    }
     switch (app) {
       case sleepwake::WakeApp::Library:
         activityManager.goToLibrary();
@@ -1098,7 +1106,9 @@ void loop() {
         }
         if (voice::stopRecording()) activityManager.notifyVoiceNoteSaved();
       }
-    } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS) {
+    } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS &&
+               // An upload holds loop() in the web server, so the recording could not be written or stopped.
+               activityManager.rootActivityName() != "CrossPointWebServer") {
       holdConsumed = true;
       voice::Place place;
       activityManager.fillVoicePlace(place);

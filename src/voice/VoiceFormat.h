@@ -142,8 +142,7 @@ inline long parseContentLength(const std::string& head) {
   for (size_t line = head.find("\r\n"); line != std::string::npos; line = head.find("\r\n", line + 2)) {
     static constexpr char kName[] = "content-length:";
     size_t i = 0;
-    while (i + 1 < sizeof(kName) && line + 2 + i < head.size() &&
-           (head[line + 2 + i] | 0x20) == kName[i]) {
+    while (i + 1 < sizeof(kName) && line + 2 + i < head.size() && (head[line + 2 + i] | 0x20) == kName[i]) {
       ++i;
     }
     if (i + 1 < sizeof(kName)) continue;
@@ -207,7 +206,17 @@ class SampleRing {
 };
 
 // Notes app labels. The UI turns each into its translated string.
-enum class NoteLabel { None, Syncing, Transcribing, UploadingAudio, TranscriptionFailed, NotSetUp, TokenRefused, NeedsLogin, NotSynced };
+enum class NoteLabel {
+  None,
+  Syncing,
+  Transcribing,
+  UploadingAudio,
+  TranscriptionFailed,
+  NotSetUp,
+  TokenRefused,
+  NeedsLogin,
+  NotSynced
+};
 
 // Notes app: the subtitle for a note without text, from the server's status.
 inline NoteLabel pendingNoteLabel(const char* status) {

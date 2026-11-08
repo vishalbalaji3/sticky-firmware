@@ -118,7 +118,8 @@ void NotesActivity::syncNow() {
         result = voice::syncNotes(saved);
       }
       pending = loadRows();
-      status = voice::notesSyncStatus(online, result.unconfigured, result.unauthorized, result.needsLogin, saved, pending);
+      status =
+          voice::notesSyncStatus(online, result.unconfigured, result.unauthorized, result.needsLogin, saved, pending);
       if (!online || !saved) pending = 0;  // nothing to recheck without a working connection
     }
   }

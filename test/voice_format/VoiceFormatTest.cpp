@@ -142,7 +142,8 @@ TEST(NotesSync, RechecksOnlyWhilePendingAndBounded) {
 
 TEST(NotesSync, StatusAfterSync) {
   EXPECT_EQ(voice::notesSyncStatus(false, false, false, false, false, 0), voice::NoteLabel::NotSynced);  // offline
-  EXPECT_EQ(voice::notesSyncStatus(true, false, false, false, false, 0), voice::NoteLabel::NotSynced);   // download failed
+  EXPECT_EQ(voice::notesSyncStatus(true, false, false, false, false, 0),
+            voice::NoteLabel::NotSynced);  // download failed
   EXPECT_EQ(voice::notesSyncStatus(true, true, false, false, false, 0), voice::NoteLabel::NotSetUp);
   EXPECT_EQ(voice::notesSyncStatus(true, false, true, false, false, 0), voice::NoteLabel::TokenRefused);
   EXPECT_EQ(voice::notesSyncStatus(true, false, false, false, true, 2), voice::NoteLabel::Transcribing);
