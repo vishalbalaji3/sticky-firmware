@@ -1,6 +1,7 @@
 #include "SleepActivity.h"
 
 #include <ArduinoJson.h>
+#include <HalPowerManager.h>
 #include <BitmapHelpers.h>
 #include <BmpToBmpConverter.h>
 #include <Epub.h>
@@ -866,8 +867,11 @@ void SleepActivity::drawDateBand(const JsonDocument& doc) const {
   }
 
   const int width = renderer.getScreenWidth();
-  renderer.fillRect(0, 0, width, 110, false);
-  renderer.drawLine(0, 110, width, 110);
+  // The band ends a margin below its last line, so it fits with or without the details line.
+  const int bottom = (details.empty() ? 26 + renderer.getLineHeight(UI_12_FONT_ID)
+                                      : 66 + renderer.getLineHeight(UI_10_FONT_ID)) + 16;
+  renderer.fillRect(0, 0, width, bottom, false);
+  renderer.drawLine(0, bottom, width, bottom);
   if (date[0]) renderer.drawCenteredText(UI_12_FONT_ID, 26, date, true, EpdFontFamily::BOLD);
   if (!details.empty()) renderer.drawCenteredText(UI_10_FONT_ID, 66, details.c_str());
 }
@@ -887,18 +891,21 @@ void SleepActivity::drawAsleepMarker(const bool compact) const {
     drawMoon(moon.x, moon.y, kMoon);
     return;
   }
-  constexpr int kX = 12;
-  constexpr int kY = 8;
+  // Lock screen: a moon and the battery icon on one row, on a white pill sized to them.
+  constexpr int kX = 14;
+  constexpr int kY = 12;
   constexpr int kMoon = 16;
+  constexpr int kGap = 8;
+  constexpr int kPad = 6;
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const char* label = tr(STR_SLEEPING);
-  const int labelEnd = kX + kMoon + 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10 + metrics.batteryWidth;
-  renderer.fillRoundedRect(kX - 6, kY - 4, labelEnd - kX + 12, std::max(kMoon, metrics.batteryHeight) + 8, 6,
+  const Rect battery{kX + kMoon + kGap, kY + (kMoon - metrics.batteryHeight) / 2, metrics.batteryWidth,
+                     metrics.batteryHeight};
+  const int contentWidth = battery.x + battery.width + 1 - kX;  // The outline's tip sits one pixel past its width.
+  renderer.fillRoundedRect(kX - kPad, kY - kPad, contentWidth + 2 * kPad, kMoon + 2 * kPad, (kMoon + 2 * kPad) / 2,
                            Color::White);  // Readable over a dark wallpaper.
   drawMoon(kX, kY, kMoon);
-  renderer.drawText(SMALL_FONT_ID, kX + kMoon + 6, kY, label);
-  const int batteryX = kX + kMoon + 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10;
-  GUI.drawBatteryLeft(renderer, Rect{batteryX, kY, metrics.batteryWidth, metrics.batteryHeight}, true);
+  BaseTheme::drawBatteryOutline(renderer, battery.x, battery.y, battery.width, battery.height);
+  GUI.fillBatteryIcon(renderer, battery, powerManager.getBatteryPercentage());
 }
 
 // Crescent: a black disc with a white one bitten out of its upper right.
