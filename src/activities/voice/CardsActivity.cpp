@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <ctime>
 
 #include "CrossPointSettings.h"
@@ -26,6 +27,12 @@ namespace {
 constexpr const char* kLabels[] = {"Again", "Hard", "Good", "Easy"};
 constexpr int kRatingBarHeight = 110;
 constexpr float kCardFontPointSize = 18.0f;
+constexpr int kToggleWidth = 130;
+constexpr int kToggleHeight = 50;
+
+bool inFuriganaToggle(const int x, const int y, const int width) {
+  return x >= width - kToggleWidth - 8 && y <= kToggleHeight + 8;
+}
 }  // namespace
 
 void CardsActivity::onEnter() {
@@ -43,6 +50,7 @@ void CardsActivity::loadCards() {
   cards.clear();
   index = 0;
   revealed = false;
+  furigana = false;
   std::string text;
   if (voice::readTextFile(voice::kCardsPath, text, 256 * 1024)) {
     // Cards rated since the last sync are already waiting to upload, so they are not asked again.
@@ -57,6 +65,9 @@ void CardsActivity::loadCards() {
         row.id = id;
         row.front = card["front"] | "";
         row.back = card["back"] | "";
+        for (JsonObjectConst segment : card["ruby"].as<JsonArrayConst>()) {
+          row.ruby.emplace_back(segment["t"] | "", segment["r"] | "");
+        }
         row.lastReview = card["lastReview"].isNull() ? "null" : std::to_string(card["lastReview"].as<uint64_t>());
         cards.push_back(std::move(row));
       }
@@ -97,6 +108,7 @@ void CardsActivity::rate(const int rating) {
   file.close();
   index++;
   revealed = false;
+  furigana = false;
   requestUpdate();
 }
 
@@ -114,6 +126,11 @@ void CardsActivity::loop() {
   int x;
   int y;
   if (!mappedInput.wasScreenTapped(x, y)) return;
+  if (!cards[index].ruby.empty() && inFuriganaToggle(x, y, renderer.getScreenWidth())) {
+    furigana = !furigana;
+    requestUpdate();
+    return;
+  }
   if (!revealed) {
     revealed = true;
     requestUpdate();
@@ -159,7 +176,68 @@ void CardsActivity::render(RenderLock&&) {
       start = end + 1;
     }
   };
-  drawBlock(card.front);
+  if (!card.ruby.empty()) {
+    const int left = width - kToggleWidth - 8;
+    if (furigana) {
+      renderer.fillRect(left, 8, kToggleWidth, kToggleHeight);
+    } else {
+      renderer.drawRect(left, 8, kToggleWidth, kToggleHeight);
+    }
+    const int labelWidth = renderer.getTextWidth(UI_10_FONT_ID, "Furigana");
+    renderer.drawText(UI_10_FONT_ID, left + (kToggleWidth - labelWidth) / 2, 8 + kToggleHeight / 2 - 10, "Furigana",
+                      !furigana);
+  }
+
+  if (furigana && !card.ruby.empty()) {
+    // Readings sit above their text. A segment with a reading never splits; plain text breaks per character.
+    struct Piece {
+      std::string text;
+      std::string reading;
+      int width;
+    };
+    std::vector<std::vector<Piece>> lines(1);
+    int lineWidth = 0;
+    const auto add = [&](const std::string& text, const std::string& reading) {
+      const int w = std::max(renderer.getTextWidth(cardFont, text.c_str()),
+                             reading.empty() ? 0 : renderer.getTextWidth(UI_10_FONT_ID, reading.c_str()));
+      if (lineWidth + w > width - 48 && !lines.back().empty()) {
+        lines.emplace_back();
+        lineWidth = 0;
+      }
+      lines.back().push_back({text, reading, w});
+      lineWidth += w;
+    };
+    for (const auto& [text, reading] : card.ruby) {
+      if (!reading.empty()) {
+        add(text, reading);
+        continue;
+      }
+      for (size_t i = 0; i < text.size();) {
+        size_t n = 1;
+        while (i + n < text.size() && (static_cast<unsigned char>(text[i + n]) & 0xC0) == 0x80) n++;
+        add(text.substr(i, n), "");
+        i += n;
+      }
+    }
+    const int readingHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    for (const auto& line : lines) {
+      int total = 0;
+      for (const Piece& piece : line) total += piece.width;
+      int x = (width - total) / 2;
+      for (const Piece& piece : line) {
+        if (!piece.reading.empty()) {
+          renderer.drawText(UI_10_FONT_ID, x + (piece.width - renderer.getTextWidth(UI_10_FONT_ID, piece.reading.c_str())) / 2,
+                            y, piece.reading.c_str());
+        }
+        renderer.drawText(cardFont, x + (piece.width - renderer.getTextWidth(cardFont, piece.text.c_str())) / 2,
+                          y + readingHeight, piece.text.c_str());
+        x += piece.width;
+      }
+      y += readingHeight + renderer.getLineHeight(cardFont) + 6;
+    }
+  } else {
+    drawBlock(card.front);
+  }
 
   if (!revealed) {
     renderer.drawCenteredText(UI_10_FONT_ID, height - 60, "Tap to show the answer");

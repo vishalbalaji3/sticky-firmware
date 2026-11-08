@@ -20,6 +20,7 @@ class CardsActivity final : public Activity {
     std::string id;
     std::string front;
     std::string back;
+    std::vector<std::pair<std::string, std::string>> ruby;  // Front as (text, reading) segments, when it has readings.
     std::string lastReview;  // Kept as raw JSON, because null and a large number must both round-trip.
   };
 
@@ -30,5 +31,6 @@ class CardsActivity final : public Activity {
   std::vector<Card> cards;
   size_t index = 0;
   bool revealed = false;
+  bool furigana = false;
   bool syncPending = true;  // Opening syncs over a saved network, after the cached cards are on screen.
 };
