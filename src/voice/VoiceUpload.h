@@ -19,8 +19,14 @@ constexpr const char* kCardsPath = "/.sticky/cards.json";
 constexpr const char* kReviewsPath = "/.sticky/reviews.jsonl";
 constexpr const char* kHomePath = "/.sticky/home.json";
 
+constexpr const char* kWallpaperPath = "/sleep.bmp";
+constexpr const char* kWallpaperIdPath = "/.sticky/wallpaper.id";
+
 // Sends offline ratings, then downloads new cards and lock screen data. Failures leave the old files.
 void syncCardsAndHome();
+
+// Requires Wi-Fi: downloads lock screen data, and the wallpaper when the PWA applied a new one.
+void syncHome();
 
 // Saves recent transcripts to the card for the Notes app. False keeps the old file.
 bool downloadTranscripts();

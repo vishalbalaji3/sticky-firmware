@@ -694,7 +694,7 @@ void SleepActivity::onEnter() {
   Activity::onEnter();
 
 #if FREEINK_DEVICE_STICKY
-  if (sleepwake::stickyScreenFor(fromTimeout) == sleepwake::StickyScreen::Dashboard) return renderLockScreen();
+  if (sleepwake::stickyScreenFor(fromTimeout, APP_STATE.lastSleepFromReader) == sleepwake::StickyScreen::Dashboard) return renderLockScreen();
   // Keep the shown frame and add only the badge; main.cpp saves it as a Quick Resume frame.
   if (BaseTheme::batterySpot.valid) {
     renderer.setOrientation(static_cast<GfxRenderer::Orientation>(BaseTheme::batterySpot.orientation));
@@ -821,24 +821,30 @@ bool SleepActivity::renderCustomSleepBmp(const std::string& path) const {
   return true;
 }
 
-// Wallpaper from /sleep.bmp with today's details, as of the last sync. Times are left out on purpose:
-// nothing redraws the screen during sleep yet, so a clock would show the wrong time and look right.
+// Wallpaper from /sleep.bmp with today's details, as of the last sync, in the design chosen in the PWA
+// ("classic" or "photo"). Times are left out on purpose: nothing redraws the screen during sleep yet,
+// so a clock would show the wrong time and look right.
 void SleepActivity::renderLockScreen() const {
-  const bool hasWallpaper = Storage.exists("/sleep.bmp") && renderCustomSleepBmp("/sleep.bmp");
+  const bool hasWallpaper = Storage.exists(voice::kWallpaperPath) && renderCustomSleepBmp(voice::kWallpaperPath);
   if (!hasWallpaper) renderer.clearScreen();
 
-  std::string details;
   std::string text;
   JsonDocument doc;
-  if (voice::readTextFile(voice::kHomePath, text) && !deserializeJson(doc, text)) {
-    if (!doc["weather"].isNull()) {
-      details += std::to_string(doc["weather"]["temperature"].as<int>()) + "\xC2\xB0" + (doc["weather"]["unit"] | "F") +
-                 " " + voice::weatherLabel(doc["weather"]["code"].as<int>());
-    }
-    if (!doc["cardsDue"].isNull() && doc["cardsDue"].as<int>() > 0) {
-      if (!details.empty()) details += "   ";
-      details += std::to_string(doc["cardsDue"].as<int>()) + " cards due";
-    }
+  if (!voice::readTextFile(voice::kHomePath, text) || deserializeJson(doc, text)) doc.clear();
+  if (std::string(doc["lockScreen"]["design"] | "classic") != "photo") drawDateBand(doc);
+  drawAsleepMarker();
+  renderer.displayBuffer(kSleepClean);
+}
+
+void SleepActivity::drawDateBand(const JsonDocument& doc) const {
+  std::string details;
+  if (!doc["weather"].isNull()) {
+    details += std::to_string(doc["weather"]["temperature"].as<int>()) + "\xC2\xB0" + (doc["weather"]["unit"] | "F") +
+               " " + voice::weatherLabel(doc["weather"]["code"].as<int>());
+  }
+  if (!doc["cardsDue"].isNull() && doc["cardsDue"].as<int>() > 0) {
+    if (!details.empty()) details += "   ";
+    details += std::to_string(doc["cardsDue"].as<int>()) + " cards due";
   }
 
   // The battery-backed RTC first: the system clock is lost on every reset until the next sync.
@@ -857,8 +863,6 @@ void SleepActivity::renderLockScreen() const {
   renderer.drawLine(0, 110, width, 110);
   if (date[0]) renderer.drawCenteredText(UI_12_FONT_ID, 26, date, true, EpdFontFamily::BOLD);
   if (!details.empty()) renderer.drawCenteredText(UI_10_FONT_ID, 66, details.c_str());
-  drawAsleepMarker();
-  renderer.displayBuffer(kSleepClean);
 }
 
 // The panel keeps the last frame when powered down, so this is how the owner tells sleep from awake.
@@ -881,6 +885,9 @@ void SleepActivity::drawAsleepMarker(const bool compact) const {
   constexpr int kMoon = 16;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const char* label = tr(STR_SLEEPING);
+  const int labelEnd = kX + kMoon + 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10 + metrics.batteryWidth;
+  renderer.fillRoundedRect(kX - 6, kY - 4, labelEnd - kX + 12, std::max(kMoon, metrics.batteryHeight) + 8, 6,
+                           Color::White);  // Readable over a dark wallpaper.
   drawMoon(kX, kY, kMoon);
   renderer.drawText(SMALL_FONT_ID, kX + kMoon + 6, kY, label);
   const int batteryX = kX + kMoon + 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10;

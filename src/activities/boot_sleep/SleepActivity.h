@@ -1,4 +1,6 @@
 #pragma once
+#include <ArduinoJson.h>
+
 #include <string>
 
 #include "activities/Activity.h"
@@ -16,6 +18,7 @@ class SleepActivity final : public Activity {
   void renderDefaultSleepScreen() const;
   void renderCustomSleepScreen() const;
   void renderLockScreen() const;
+  void drawDateBand(const JsonDocument& doc) const;
   void drawAsleepMarker(bool compact = false) const;
   void drawMoon(int x, int y, int size) const;
   bool renderCustomSleepBmp(const std::string& path) const;

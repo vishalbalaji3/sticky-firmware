@@ -45,6 +45,7 @@
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "activities/reader/AutoProgressSync.h"
 #include "network/SavedWifi.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
@@ -53,6 +54,7 @@
 #include "util/SlideSwitch.h"
 #include "util/Timezones.h"
 #include "voice/VoiceNotes.h"
+#include "voice/VoiceUpload.h"
 
 #if CROSSPOINT_VECTOR_FONTS
 // Rendering (incl. FreeType TTF rasterization) runs on the Arduino loop task.
@@ -477,7 +479,13 @@ void enterDeepSleep(bool fromTimeout = false) {
   deliverSleepPluginEvents(bluetoothStopped);
 
 #if FREEINK_DEVICE_STICKY
-  const bool isQuickResumeSleep = sleepwake::stickyScreenFor(fromTimeout) == sleepwake::StickyScreen::KeepFrame;
+  const bool isQuickResumeSleep =
+      sleepwake::stickyScreenFor(fromTimeout, APP_STATE.lastSleepFromReader) == sleepwake::StickyScreen::KeepFrame;
+  // Fresh weather and the design or wallpaper last applied in the PWA, before the lock screen draws.
+  if (!isQuickResumeSleep && !voice::isRecording() && powerManager.getBatteryPercentage() >= 20 &&
+      (WiFi.status() == WL_CONNECTED || (hasSavedWifi() && joinSavedWifi(autosync::kJoinTimeoutMs)))) {
+    voice::syncHome();
+  }
 #else
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||

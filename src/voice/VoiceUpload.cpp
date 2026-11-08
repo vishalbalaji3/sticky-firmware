@@ -223,7 +223,25 @@ void syncCardsAndHome() {
   }
   // New cards wait until ratings land, or the same cards would be asked twice.
   if (reviewsSent) downloadTo(config, "/api/v1/cards", kCardsPath);
-  downloadTo(config, "/api/v1/home", kHomePath);
+  syncHome();
+}
+
+void syncHome() {
+  Config config;
+  if (!loadConfig(config) || !downloadTo(config, "/api/v1/home", kHomePath)) return;
+  std::string text;
+  std::string savedId;
+  JsonDocument doc;
+  if (!readTextFile(kHomePath, text) || deserializeJson(doc, text)) return;
+  // The storage id is the wallpaper's version. None applied leaves a hand-copied /sleep.bmp alone.
+  const std::string id = doc["lockScreen"]["wallpaper"] | "";
+  readTextFile(kWallpaperIdPath, savedId);
+  if (id.empty() || id == savedId || !downloadTo(config, "/api/v1/wallpaper", kWallpaperPath)) return;
+  HalFile file;
+  if (Storage.openFileForWrite("VOICE", kWallpaperIdPath, file)) {
+    file.write(reinterpret_cast<const uint8_t*>(id.data()), id.size());
+    file.close();
+  }
 }
 
 }  // namespace voice

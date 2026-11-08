@@ -3,11 +3,12 @@
 // Sleep and wake decisions, free of hardware so host tests can cover them.
 namespace sleepwake {
 
-// Sticky: an inactivity timeout keeps the shown frame and adds a badge; Up + Down locks to the dashboard.
+// Sticky: an inactivity timeout in a book keeps the page and adds a badge; anywhere else, and Up + Down, locks to
+// the dashboard (a wake outside the reader goes home anyway, so the old frame has nothing to resume).
 enum class StickyScreen { KeepFrame, Dashboard };
 
-constexpr StickyScreen stickyScreenFor(const bool fromTimeout) {
-  return fromTimeout ? StickyScreen::KeepFrame : StickyScreen::Dashboard;
+constexpr StickyScreen stickyScreenFor(const bool fromTimeout, const bool inReader) {
+  return fromTimeout && inReader ? StickyScreen::KeepFrame : StickyScreen::Dashboard;
 }
 
 // A sleep wake reopens the book only if it slept in the reader and the last reader open did not crash.
