@@ -1,6 +1,7 @@
 #pragma once
 #include <ArduinoJson.h>
 
+#include <functional>
 #include <string>
 
 #include "activities/Activity.h"
@@ -35,4 +36,6 @@ class SleepActivity final : public Activity {
   // Cover + Transparent: the cover under the overlay, and the same cover while its gray planes are redrawn.
   mutable const Bitmap* overlayCover = nullptr;
   mutable const Bitmap* overlayGrayCover = nullptr;
+  // The lock screen's band and marker, drawn by renderBitmapSleepScreen into each pass of the wallpaper's paint.
+  mutable std::function<void()> lockOverlay;
 };

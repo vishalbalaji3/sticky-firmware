@@ -825,14 +825,21 @@ bool SleepActivity::renderCustomSleepBmp(const std::string& path) const {
 // ("classic" or "photo"). Times are left out on purpose: nothing redraws the screen during sleep yet,
 // so a clock would show the wrong time and look right.
 void SleepActivity::renderLockScreen() const {
-  const bool hasWallpaper = Storage.exists(voice::kWallpaperPath) && renderCustomSleepBmp(voice::kWallpaperPath);
-  if (!hasWallpaper) renderer.clearScreen();
-
   std::string text;
   JsonDocument doc;
   if (!voice::readTextFile(voice::kHomePath, text) || deserializeJson(doc, text)) doc.clear();
-  if (std::string(doc["lockScreen"]["design"] | "classic") != "photo") drawDateBand(doc);
-  drawAsleepMarker();
+  const bool band = std::string(doc["lockScreen"]["design"] | "classic") != "photo";
+  // Drawn into every pass of the wallpaper's one paint. A B/W refresh after the gray paint turned its grays black.
+  const auto overlay = [&] {
+    if (band) drawDateBand(doc);
+    drawAsleepMarker();
+  };
+  lockOverlay = overlay;
+  const bool shown = Storage.exists(voice::kWallpaperPath) && renderCustomSleepBmp(voice::kWallpaperPath);
+  lockOverlay = nullptr;
+  if (shown) return;
+  renderer.clearScreen();
+  overlay();
   renderer.displayBuffer(kSleepClean);
 }
 
@@ -961,6 +968,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool pre
       SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::INVERTED_BLACK_AND_WHITE) {
     renderer.invertScreen();
   }
+  if (lockOverlay) lockOverlay();
 
   // Cover + Transparent: the B/W cover is the overlay's background; the overlay renderers redraw its gray planes.
   if (overlayCover == &bitmap) {
@@ -1011,6 +1019,9 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool pre
         ready = false;
         break;
       }
+      // Absolute planes take B/W draws as-is (text renders solid). shortcut: incremental gray planes would need
+      // the overlay cleared from them instead; only the Sticky draws one, and its SSD1677 is absolute.
+      if (lockOverlay && absolute) lockOverlay();
       if (plane == GfxRenderer::GRAYSCALE_LSB)
         renderer.copyGrayscaleLsbBuffers();
       else
