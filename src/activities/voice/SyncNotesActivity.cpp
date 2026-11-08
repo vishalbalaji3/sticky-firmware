@@ -3,7 +3,6 @@
 #include <GfxRenderer.h>
 #include <WiFi.h>
 
-#include <ctime>
 #include <memory>
 
 #include "MappedInputManager.h"
@@ -11,8 +10,6 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "util/Timezones.h"
-#include "voice/VoiceFormat.h"
 #include "voice/VoiceUpload.h"
 
 void SyncNotesActivity::onEnter() {
@@ -50,19 +47,10 @@ void SyncNotesActivity::onExit() {
 }
 
 void SyncNotesActivity::syncNow() {
-  // Sets the clock for capture times and for expiring old audio.
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  for (int i = 0; i < 50 && time(nullptr) < voice::kFirstValidUnixTime; ++i) delay(100);
-  timezones::applyToClock();  // configTime() replaced the zone the rest of the UI displays in.
-
-  const voice::UploadResult result = voice::uploadQueuedNotes();
-  voice::pruneSentNotes();
-  // Fresh uploads need a moment to transcribe, so wait briefly for them to appear in the list.
-  if (result.uploaded > 0) delay(6000);
-  if (!result.unconfigured && !result.unreachable && !result.unauthorized) {
-    voice::downloadTranscripts();
-    voice::syncCardsAndHome();
-  }
+  // Fresh uploads are still transcribing; the Notes app fetches them again when opened.
+  bool transcriptsSaved = false;
+  const voice::UploadResult result = voice::syncNotes(transcriptsSaved);
+  if (!result.unconfigured && !result.unreachable && !result.unauthorized) voice::syncCardsAndHome();
 
   if (result.unconfigured) {
     message = "Add /.sticky/config.json to the card first.";

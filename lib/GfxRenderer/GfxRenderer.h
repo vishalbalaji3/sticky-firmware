@@ -78,6 +78,7 @@ class GfxRenderer {
 
   // One-shot refresh promotion (see promoteNextRefresh). Mutable because
   // Display entry points are const but must consume the flag.
+  void (*flushOverlay_)(const GfxRenderer&) = nullptr;
   mutable bool promotedRefreshPending_ = false;
   mutable HalDisplay::RefreshMode promotedRefresh_ = HalDisplay::FAST_REFRESH;
   // Swap in (and clear) the promoted mode, if one is pending.
@@ -233,6 +234,8 @@ class GfxRenderer {
   int getScreenHeight() const;
   void tapToLogical(float nx, float ny, int& outX, int& outY) const;
   void displayBuffer(HalDisplay::RefreshMode refreshMode = HalDisplay::FAST_REFRESH) const;
+  // While set, drawn into the frame just before every flush: a mark that should not cost a refresh of its own.
+  void setFlushOverlay(void (*overlay)(const GfxRenderer&)) { flushOverlay_ = overlay; }
   // One-shot: the next displayBuffer(), displayBufferAsync(), or
   // displayGrayscaleBase() call uses `mode`
   // instead of what its caller asked for, then the override clears itself.

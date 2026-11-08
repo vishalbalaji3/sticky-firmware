@@ -15,6 +15,7 @@
 #include "SecureRequest.h"
 #include "VoiceFormat.h"
 #include "VoiceNotes.h"
+#include "util/Timezones.h"
 
 namespace voice {
 namespace {
@@ -170,9 +171,21 @@ bool downloadTo(const Config& config, const char* target, const char* path) {
 
 }  // namespace
 
-void downloadTranscripts() {
+bool downloadTranscripts() {
   Config config;
-  if (loadConfig(config)) downloadTo(config, "/api/v1/notes", kTranscriptsPath);
+  return loadConfig(config) && downloadTo(config, "/api/v1/notes", kTranscriptsPath);
+}
+
+UploadResult syncNotes(bool& transcriptsSaved) {
+  // Sets the clock for capture times and for expiring old audio.
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  for (int i = 0; i < 50 && time(nullptr) < kFirstValidUnixTime; ++i) delay(100);
+  timezones::applyToClock();  // configTime() replaced the zone the rest of the UI displays in.
+
+  const UploadResult result = uploadQueuedNotes();
+  pruneSentNotes();
+  transcriptsSaved = !result.unconfigured && !result.unreachable && !result.unauthorized && downloadTranscripts();
+  return result;
 }
 
 void syncCardsAndHome() {

@@ -26,4 +26,18 @@ constexpr WakeVoice wakeVoiceFor(const bool held, const unsigned long sinceBootM
   return sinceBootMs >= kWakeVoiceHoldMs ? WakeVoice::Record : WakeVoice::Wait;
 }
 
+// Sticky: the auto-sleep moon sits beside the battery the screen already shows, on the side away from the edge,
+// centred on it.
+struct Box {
+  int x;
+  int y;
+  int width;
+  int height;
+};
+
+constexpr Box moonBesideBattery(const Box battery, const bool moonOnLeft, const int moon, const int gap) {
+  return Box{moonOnLeft ? battery.x - gap - moon : battery.x + battery.width + gap,
+             battery.y + (battery.height - moon) / 2, moon, moon};
+}
+
 }  // namespace sleepwake

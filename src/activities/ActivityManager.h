@@ -78,6 +78,7 @@ class ActivityManager {
   std::atomic<uint32_t> paintedVisit{0};
   std::atomic<bool> recordingDotAfterPaint{false};
   void paintRecordingDot();  // Caller holds the RenderLock.
+  static void drawRecordingDotInto(const GfxRenderer& target);
 
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput);
@@ -106,7 +107,7 @@ class ActivityManager {
   void notifyVoiceNoteSaved();
   // E-paper is too slow to confirm recording quickly, so capture is already running when this appears.
   void drawRecordingDot();
-  // A recording begun during boot shows its dot over the first screen painted.
+  // A recording begun during boot shows its dot in the first screen painted.
   void drawRecordingDotAfterPaint() { recordingDotAfterPaint = true; }
   void goToPlugins(bool showOpds);
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
@@ -133,6 +134,8 @@ class ActivityManager {
   bool remoteClick(RemoteButton button);
   // Home is in front and has painted a frame of its own (not one left from the screen before).
   bool isForegroundHomeShown() const;
+  // The screen in front has finished its first paint.
+  bool currentScreenPainted() const { return paintedVisit.load(std::memory_order_acquire) == screenVisit; }
   uint32_t visit() const { return screenVisit; }
   bool remoteTurn(bool forward, bool chapter);
   // A remote button mapped to the reader menu (true) or to a new clipping (false).

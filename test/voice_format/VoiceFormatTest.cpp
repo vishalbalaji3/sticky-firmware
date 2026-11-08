@@ -111,3 +111,27 @@ TEST(Ring, CountsOverflowAndKeepsOldestSamples) {
   EXPECT_EQ(1, p[0]);
   EXPECT_EQ(4, p[3]);
 }
+
+TEST(NotesSync, LabelsNotesWithoutText) {
+  EXPECT_STREQ(voice::pendingNoteLabel("transcribing"), "Transcribing...");
+  EXPECT_STREQ(voice::pendingNoteLabel("awaiting_audio"), "Uploading audio...");
+  EXPECT_STREQ(voice::pendingNoteLabel("failed"), "Transcription failed");
+  EXPECT_STREQ(voice::pendingNoteLabel("ready"), "");
+  EXPECT_TRUE(voice::transcriptPending("transcribing"));
+  EXPECT_FALSE(voice::transcriptPending("failed"));
+}
+
+TEST(NotesSync, RechecksOnlyWhilePendingAndBounded) {
+  EXPECT_TRUE(voice::shouldRecheckTranscripts(1, 0));
+  EXPECT_FALSE(voice::shouldRecheckTranscripts(0, 0));
+  EXPECT_FALSE(voice::shouldRecheckTranscripts(2, voice::kTranscriptRechecks));
+}
+
+TEST(NotesSync, StatusAfterSync) {
+  EXPECT_STREQ(voice::notesSyncStatus(false, false, false, false, 0), "Not synced");  // offline
+  EXPECT_STREQ(voice::notesSyncStatus(true, false, false, false, 0), "Not synced");   // download failed
+  EXPECT_STREQ(voice::notesSyncStatus(true, true, false, false, 0), "Not set up");
+  EXPECT_STREQ(voice::notesSyncStatus(true, false, true, false, 0), "Token refused");
+  EXPECT_STREQ(voice::notesSyncStatus(true, false, false, true, 2), "Transcribing...");
+  EXPECT_EQ(voice::notesSyncStatus(true, false, false, true, 0), nullptr);
+}

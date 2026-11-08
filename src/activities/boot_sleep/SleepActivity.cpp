@@ -695,7 +695,11 @@ void SleepActivity::onEnter() {
 #if FREEINK_DEVICE_STICKY
   if (sleepwake::stickyScreenFor(fromTimeout) == sleepwake::StickyScreen::Dashboard) return renderLockScreen();
   // Keep the shown frame and add only the badge; main.cpp saves it as a Quick Resume frame.
-  if (APP_STATE.lastSleepFromReader) ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  if (BaseTheme::batterySpot.valid) {
+    renderer.setOrientation(static_cast<GfxRenderer::Orientation>(BaseTheme::batterySpot.orientation));
+  } else if (APP_STATE.lastSleepFromReader) {
+    ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  }
   drawAsleepMarker(/*compact=*/true);
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
   return renderer.displayBuffer(HalDisplay::FAST_REFRESH);
@@ -854,26 +858,35 @@ void SleepActivity::renderLockScreen() const {
 }
 
 // The panel keeps the last frame when powered down, so this is how the owner tells sleep from awake.
-// Compact: moon and battery on a small white card over the reader's own bottom-left battery.
+// Compact: a moon beside the battery the screen already shows.
 void SleepActivity::drawAsleepMarker(const bool compact) const {
-  constexpr int kX = 12;
-  constexpr int kMoon = 16;
-  const int kY = compact ? renderer.getScreenHeight() - std::max(kMoon, renderer.getLineHeight(SMALL_FONT_ID)) - 8 : 8;
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const char* label = compact ? nullptr : tr(STR_SLEEPING);
-  const int batteryX = kX + kMoon + (label ? 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10 : 8);
   if (compact) {
-    // drawBatteryLeft puts the percentage after the icon; leave room for "100%".
-    const int right = batteryX + metrics.batteryWidth + 4 + renderer.getTextWidth(SMALL_FONT_ID, "100%") + 6;
-    const int bottom = kY + std::max(kMoon, renderer.getLineHeight(SMALL_FONT_ID)) + 4;
-    renderer.fillRoundedRect(kX - 6, kY - 5, right - kX + 6, bottom - kY + 5, 6, Color::White);
-    renderer.drawRoundedRect(kX - 6, kY - 5, right - kX + 6, bottom - kY + 5, 1, 6, true);
+    constexpr int kMoon = 12;
+    const auto& spot = BaseTheme::batterySpot;
+    // A screen without a battery gets the moon in the bottom-left corner.
+    const sleepwake::Box battery = spot.valid
+                                       ? sleepwake::Box{spot.rect.x, spot.rect.y, spot.rect.width, spot.rect.height}
+                                       : sleepwake::Box{0, renderer.getScreenHeight() - 26, 0, kMoon};
+    const sleepwake::Box moon = sleepwake::moonBesideBattery(battery, spot.valid && spot.moonOnLeft, kMoon, 6);
+    renderer.fillRoundedRect(moon.x - 2, moon.y - 2, kMoon + 4, kMoon + 4, kMoon / 2 + 2, Color::White);
+    drawMoon(moon.x, moon.y, kMoon);
+    return;
   }
-  // Crescent: a black disc with a white one bitten out of its upper right.
-  renderer.fillRoundedRect(kX, kY, kMoon, kMoon, kMoon / 2, Color::Black);
-  renderer.fillRoundedRect(kX + 6, kY - 3, kMoon - 2, kMoon - 2, (kMoon - 2) / 2, Color::White);
-  if (label) renderer.drawText(SMALL_FONT_ID, kX + kMoon + 6, kY, label);
+  constexpr int kX = 12;
+  constexpr int kY = 8;
+  constexpr int kMoon = 16;
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const char* label = tr(STR_SLEEPING);
+  drawMoon(kX, kY, kMoon);
+  renderer.drawText(SMALL_FONT_ID, kX + kMoon + 6, kY, label);
+  const int batteryX = kX + kMoon + 6 + renderer.getTextWidth(SMALL_FONT_ID, label) + 10;
   GUI.drawBatteryLeft(renderer, Rect{batteryX, kY, metrics.batteryWidth, metrics.batteryHeight}, true);
+}
+
+// Crescent: a black disc with a white one bitten out of its upper right.
+void SleepActivity::drawMoon(const int x, const int y, const int size) const {
+  renderer.fillRoundedRect(x, y, size, size, size / 2, Color::Black);
+  renderer.fillRoundedRect(x + size * 3 / 8, y - size * 3 / 16, size - 2, size - 2, (size - 2) / 2, Color::White);
 }
 
 void SleepActivity::renderCustomSleepScreen() const {

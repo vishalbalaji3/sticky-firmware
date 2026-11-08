@@ -113,7 +113,9 @@ void BaseTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t
   }
 }
 
-void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bool showPercentage) const {
+BaseTheme::BatterySpot BaseTheme::batterySpot;
+
+Rect BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bool showPercentage) const {
   // Left aligned: icon on left, percentage on right (reader mode)
   const uint16_t percentage = powerManager.getBatteryPercentage();
   // Center the icon on the digits' ink, which sits a font-dependent distance
@@ -135,6 +137,7 @@ void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bo
   const Rect iconRect{rect.x, y, rect.width, rect.height};
   drawBatteryOutline(renderer, rect.x, y, rect.width, rect.height);
   fillBatteryIcon(renderer, iconRect, percentage);
+  return iconRect;
 }
 
 void BaseTheme::drawCoverPlaceholder(const GfxRenderer& renderer, Rect rect) {
@@ -403,8 +406,19 @@ freeink::ui::Rect BaseTheme::headerBand(const GfxRenderer& renderer, const freei
   // Only the status line sits up in the rounded corners; it alone gets their clearance.
   const int corner = BoardConfig::ACTIVE.cornerRadius;
   props.status.edgeInset = static_cast<int16_t>(props.status.edgeInset + std::max(0, corner - std::min(left, right)));
-  return freeink::ui::Rect{static_cast<int16_t>(rect.x + l), static_cast<int16_t>(rect.y + offset),
-                           static_cast<int16_t>(rect.width - l - r), static_cast<int16_t>(rect.height - offset)};
+  const freeink::ui::Rect band{static_cast<int16_t>(rect.x + l), static_cast<int16_t>(rect.y + offset),
+                               static_cast<int16_t>(rect.width - l - r), static_cast<int16_t>(rect.height - offset)};
+  const auto& status = props.status;
+  if (status.showBattery) {
+    // Same block fui::header pins the battery to: glyph, its nub, and the label.
+    int reserve = status.battery.glyphWidth + 2;
+    if (status.battery.label)
+      reserve += status.battery.gap + renderer.getTextWidth(SMALL_FONT_ID, status.battery.label);
+    const int x = status.batteryLeft ? band.x + status.edgeInset : band.x + band.width - status.edgeInset - reserve;
+    batterySpot = BatterySpot{Rect{x, band.y, reserve, status.stripHeight}, !status.batteryLeft,
+                              static_cast<uint8_t>(renderer.getOrientation()), true};
+  }
+  return band;
 }
 
 void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
@@ -887,10 +901,11 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   // Draw Battery
   const bool showBatteryPercentage = sb.showBatteryPercent;
 
+  Rect batteryIcon;
   if (sb.showBattery) {
-    GUI.drawBatteryLeft(renderer,
-                        Rect{leftClusterX + leftClusterWidth, textY, metrics.batteryWidth, metrics.batteryHeight},
-                        showBatteryPercentage);
+    batteryIcon = GUI.drawBatteryLeft(
+        renderer, Rect{leftClusterX + leftClusterWidth, textY, metrics.batteryWidth, metrics.batteryHeight},
+        showBatteryPercentage);
     int batteryWidth = metrics.batteryWidth;
 
     if (showBatteryPercentage) {
@@ -928,6 +943,12 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     const int bookmarkY = textY + 5;
     drawBookmarkStatusIcon(renderer, bookmarkX, bookmarkY);
     leftClusterWidth += bookmarkStatusIconWidth + bookmarkGap;
+  }
+
+  // The whole left cluster: the title keeps 30px clear of it, so the auto-sleep moon fits after it.
+  if (sb.showBattery) {
+    batterySpot = BatterySpot{Rect{leftClusterX, batteryIcon.y, leftClusterWidth, batteryIcon.height}, false,
+                              static_cast<uint8_t>(renderer.getOrientation()), true};
   }
 
   // Draw Title

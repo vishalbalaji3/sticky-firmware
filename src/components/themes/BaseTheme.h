@@ -240,8 +240,17 @@ class BaseTheme {
   // slot. Rescaling a dithered bitmap aliases badly, so overflow is cropped.
   static bool drawCoverThumbFill(const GfxRenderer& renderer, const Bitmap& bitmap, Rect slot, int xOffset = 0);
   static void drawProgressBar(const GfxRenderer& renderer, Rect rect, size_t current, size_t total);
-  void drawBatteryLeft(const GfxRenderer& renderer, Rect rect,
-                       bool showPercentage = true) const;  // Left aligned (reader mode)
+  // Left aligned (reader mode). Returns where the icon was drawn.
+  Rect drawBatteryLeft(const GfxRenderer& renderer, Rect rect, bool showPercentage = true) const;
+  // Where the screen on display drew its battery (icon and label), so the auto-sleep moon can sit beside it.
+  // The render task records it; ActivityManager clears it before a new screen's first paint.
+  struct BatterySpot {
+    Rect rect;
+    bool moonOnLeft = false;  // the battery hugs the right edge
+    uint8_t orientation = 0;  // GfxRenderer::Orientation the spot was drawn in
+    bool valid = false;
+  };
+  static BatterySpot batterySpot;
   virtual void fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const;
   virtual void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                const char* btn4) const;
