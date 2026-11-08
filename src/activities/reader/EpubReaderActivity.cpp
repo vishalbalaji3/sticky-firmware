@@ -1352,7 +1352,7 @@ bool EpubReaderActivity::autoPullOnOpen() {
       autosync::record(bookPath, false);
       return false;
     }
-    GUI.drawPopup(renderer, "Syncing progress...");
+    GUI.drawPopup(renderer, tr(STR_SYNCING_READING_PROGRESS));
   }
   if (joinSavedWifi(autosync::kJoinTimeoutMs)) {
     launchKOReaderSync(/*automatic=*/true);
@@ -1373,7 +1373,7 @@ void EpubReaderActivity::onExit() {
   ReaderActivity::onExit();
   if (!push) return;
   // ActivityManager holds the render lock here, so draw directly.
-  GUI.drawPopup(renderer, "Syncing progress...");
+  GUI.drawPopup(renderer, tr(STR_SYNCING_READING_PROGRESS));
   autosync::pushProgress(epub, position);
 }
 

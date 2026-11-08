@@ -9,12 +9,14 @@ struct UploadResult {
   int remaining = 0;
   bool unconfigured = false;  // /.sticky/config.json is missing or incomplete.
   bool unauthorized = false;  // The token was refused, so it needs replacing.
-  bool unreachable = false;   // Often a network with a sign-in page.
+  bool unreachable = false;   // The server could not be reached.
+  bool needsLogin = false;    // Unreachable because the network shows a sign-in page first.
 };
 
 // Sends every waiting note. Requires Wi-Fi. A note leaves the queue only after the server confirms it.
 UploadResult uploadQueuedNotes();
 
+constexpr const char* kTranscriptsPath = "/.sticky/transcripts.json";
 constexpr const char* kCardsPath = "/.sticky/cards.json";
 constexpr const char* kReviewsPath = "/.sticky/reviews.jsonl";
 constexpr const char* kHomePath = "/.sticky/home.json";

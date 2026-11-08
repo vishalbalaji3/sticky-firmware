@@ -76,6 +76,19 @@ TEST(Http, ParsesStatusLines) {
   EXPECT_EQ(-1, parseHttpStatus("HTTP/1.1 abc"));
 }
 
+TEST(Http, ContentLength) {
+  EXPECT_EQ(24, parseContentLength("HTTP/1.1 401 Unauthorized\r\nContent-Type: x\r\nContent-Length: 24\r\n\r\n"));
+  EXPECT_EQ(0, parseContentLength("HTTP/1.1 200 OK\r\ncontent-length:0\r\n\r\n"));
+  EXPECT_EQ(-1, parseContentLength("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
+  EXPECT_EQ(-1, parseContentLength("HTTP/1.1 200 OK\r\nX-Content-Length: 5\r\n\r\n"));
+}
+
+TEST(Reviews, BodySkipsALineCutShort) {
+  EXPECT_EQ("{\"reviews\":[{\"a\":1},{\"b\":2}]}", reviewsBody("{\"a\":1}\n{\"b\":2}\n"));
+  EXPECT_EQ("{\"reviews\":[{\"a\":1}]}", reviewsBody("{\"a\":1}\n{\"cardId\":\"x\",\"rat"));
+  EXPECT_EQ("{\"reviews\":[]}", reviewsBody(""));
+}
+
 TEST(Ring, WrapsWithoutLosingOrder) {
   std::vector<int16_t> storage(8);
   SampleRing ring;
@@ -113,10 +126,10 @@ TEST(Ring, CountsOverflowAndKeepsOldestSamples) {
 }
 
 TEST(NotesSync, LabelsNotesWithoutText) {
-  EXPECT_STREQ(voice::pendingNoteLabel("transcribing"), "Transcribing...");
-  EXPECT_STREQ(voice::pendingNoteLabel("awaiting_audio"), "Uploading audio...");
-  EXPECT_STREQ(voice::pendingNoteLabel("failed"), "Transcription failed");
-  EXPECT_STREQ(voice::pendingNoteLabel("ready"), "");
+  EXPECT_EQ(voice::pendingNoteLabel("transcribing"), voice::NoteLabel::Transcribing);
+  EXPECT_EQ(voice::pendingNoteLabel("awaiting_audio"), voice::NoteLabel::UploadingAudio);
+  EXPECT_EQ(voice::pendingNoteLabel("failed"), voice::NoteLabel::TranscriptionFailed);
+  EXPECT_EQ(voice::pendingNoteLabel("ready"), voice::NoteLabel::None);
   EXPECT_TRUE(voice::transcriptPending("transcribing"));
   EXPECT_FALSE(voice::transcriptPending("failed"));
 }
@@ -128,10 +141,11 @@ TEST(NotesSync, RechecksOnlyWhilePendingAndBounded) {
 }
 
 TEST(NotesSync, StatusAfterSync) {
-  EXPECT_STREQ(voice::notesSyncStatus(false, false, false, false, 0), "Not synced");  // offline
-  EXPECT_STREQ(voice::notesSyncStatus(true, false, false, false, 0), "Not synced");   // download failed
-  EXPECT_STREQ(voice::notesSyncStatus(true, true, false, false, 0), "Not set up");
-  EXPECT_STREQ(voice::notesSyncStatus(true, false, true, false, 0), "Token refused");
-  EXPECT_STREQ(voice::notesSyncStatus(true, false, false, true, 2), "Transcribing...");
-  EXPECT_EQ(voice::notesSyncStatus(true, false, false, true, 0), nullptr);
+  EXPECT_EQ(voice::notesSyncStatus(false, false, false, false, false, 0), voice::NoteLabel::NotSynced);  // offline
+  EXPECT_EQ(voice::notesSyncStatus(true, false, false, false, false, 0), voice::NoteLabel::NotSynced);   // download failed
+  EXPECT_EQ(voice::notesSyncStatus(true, true, false, false, false, 0), voice::NoteLabel::NotSetUp);
+  EXPECT_EQ(voice::notesSyncStatus(true, false, true, false, false, 0), voice::NoteLabel::TokenRefused);
+  EXPECT_EQ(voice::notesSyncStatus(true, false, false, false, true, 2), voice::NoteLabel::Transcribing);
+  EXPECT_EQ(voice::notesSyncStatus(true, false, false, false, true, 0), voice::NoteLabel::None);
+  EXPECT_EQ(voice::notesSyncStatus(true, false, false, true, false, 0), voice::NoteLabel::NeedsLogin);
 }

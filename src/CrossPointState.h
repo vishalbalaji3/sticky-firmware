@@ -20,6 +20,7 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint32_t sleepOverlayLcgState = 0;
   uint8_t readerActivityLoadCount = 0;
   bool lastSleepFromReader = false;
+  std::string sleptInApp;  // Name of the app the last sleep left, for sleepwake::wakeAppFor().
   bool showBootScreen = true;
 
   static const char* getFilePath() { return "/.crosspoint/state.json"; }

@@ -466,6 +466,7 @@ static bool holdSleepWhileUsbPowered() {
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
+  APP_STATE.sleptInApp = activityManager.rootActivityName();
 
   // Sleep may end in a power-off (battery death, latch); persist the clock
   // floor now so a later cold boot resumes from it.
@@ -691,8 +692,6 @@ void setup() {
   SETTINGS.loadFromFile();
 #if FREEINK_DEVICE_STICKY
   SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::IGNORE;  // loop() handles this button itself.
-  // shortcut: moves cards still on the old default to every 5 pages, so choosing 15 in Settings won't stick.
-  if (SETTINGS.refreshFrequency == CrossPointSettings::REFRESH_15) SETTINGS.refreshFrequency = CrossPointSettings::REFRESH_5;
 #endif
   // Push the saved timezone's POSIX rule into the clock (migrating the legacy
   // UTC-offset setting on first boot after the update).
@@ -850,9 +849,31 @@ void setup() {
   } else if (!sleepwake::wakeReopensBook(!APP_STATE.openEpubPath.empty(), APP_STATE.lastSleepFromReader,
                                          mappedInputManager.isPressed(MappedInputManager::Button::Back),
                                          APP_STATE.readerActivityLoadCount > 0)) {
-    // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
-    // crashed (indicated by readerActivityLoadCount > 0)
-    activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
+    // Boot to the app it slept in (home if none), unless Back is held. The book is skipped if none is open, the
+    // last sleep was outside the reader, or the reader crashed (readerActivityLoadCount > 0).
+    const auto app = mappedInputManager.isPressed(MappedInputManager::Button::Back)
+                         ? sleepwake::WakeApp::Home
+                         : sleepwake::wakeAppFor(APP_STATE.sleptInApp);
+    switch (app) {
+      case sleepwake::WakeApp::Library:
+        activityManager.goToLibrary();
+        break;
+      case sleepwake::WakeApp::Notes:
+        activityManager.goToNotes();
+        break;
+      case sleepwake::WakeApp::Cards:
+        activityManager.goToCards();
+        break;
+      case sleepwake::WakeApp::Settings:
+        activityManager.goToSettings();
+        break;
+      case sleepwake::WakeApp::FileBrowser:
+        activityManager.goToFileBrowser();
+        break;
+      case sleepwake::WakeApp::Home:
+        activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
+        break;
+    }
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load
     const auto path = APP_STATE.openEpubPath;
@@ -1077,8 +1098,7 @@ void loop() {
         }
         if (voice::stopRecording()) activityManager.notifyVoiceNoteSaved();
       }
-    } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS &&
-               WiFi.getMode() == WIFI_MODE_NULL) {
+    } else if (powerDown && !holdConsumed && gpio.getPowerButtonHeldTime() >= VOICE_HOLD_MS) {
       holdConsumed = true;
       voice::Place place;
       activityManager.fillVoicePlace(place);

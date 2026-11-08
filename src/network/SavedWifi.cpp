@@ -72,7 +72,12 @@ bool joinSavedWifi(const unsigned long timeoutMs) {
   return false;
 }
 
+bool connectSavedWifi(const unsigned long timeoutMs) {
+  return WiFi.status() == WL_CONNECTED || (hasSavedWifi() && joinSavedWifi(timeoutMs));
+}
+
 void stopWifi() {
+  if (WiFi.getMode() == WIFI_MODE_NULL) return;
   WiFi.disconnect(false);
   delay(30);
   WiFi.mode(WIFI_OFF);

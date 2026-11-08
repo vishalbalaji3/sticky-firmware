@@ -47,7 +47,17 @@ These are new files where possible:
 - Picture viewer: `src/activities/reader/PictureViewerActivity.*` and `PictureViewport.h`.
 - Sleep and lock: `SleepWakePolicy.h`, `SleepActivity::drawAsleepMarker`.
 
-On-card config is `/.sticky/config.json` (`host`, device `token`, `tvHost`). `/.sticky/` is hidden from the web file manager.
+On-card config is `/.sticky/config.json` (`host`, device `token`). `/.sticky/` is hidden from the web file manager.
+
+## Exceptions to the shared rules
+
+Two Sticky screens read raw touch, against [touch-and-ui.md](docs/contributing/touch-and-ui.md). FreeInkUI has
+no component for either:
+- `PictureViewerActivity`: tap-to-zoom around the tapped point, and drag to pan.
+- `CardsActivity`: card text with furigana above it. Its Furigana toggle and rating bar use the same `Rect` for
+  drawing and for tap checks. Layout is relative to `UITheme::getContentArea()`.
+
+Keep these exceptions in these files. Other new screens still use FreeInkUI.
 
 ## Integrated reader updates
 

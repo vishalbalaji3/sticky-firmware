@@ -466,6 +466,11 @@ bool ActivityManager::isReaderActivity() const {
          (currentActivity && currentActivity->isReaderActivity());
 }
 
+std::string ActivityManager::rootActivityName() const {
+  if (!stackActivities.empty()) return stackActivities.front()->name;
+  return currentActivity ? currentActivity->name : std::string();
+}
+
 bool ActivityManager::isForegroundReader() const {
   return pendingAction == PendingAction::None && currentActivity && currentActivity->isReaderActivity();
 }

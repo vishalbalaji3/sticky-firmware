@@ -1,10 +1,10 @@
 #include "VoiceNotes.h"
 
 #include <ArduinoJson.h>
+#include <HalMemory.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Microphone.h>
-#include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -24,7 +24,7 @@ constexpr size_t kPumpMaxSamples = 8192;
 
 Microphone mic;
 SampleRing ring;
-int16_t* ringBuffer = nullptr;
+HalMemory::PsramBuffer ringBuffer;  // Kept for the whole session once allocated.
 HalFile audioFile;
 std::string audioPath;
 std::string clientId;
@@ -100,7 +100,7 @@ bool startRecording(const Place& place) {
   if (recording) return true;
   if (!Storage.ensureDirectoryExists(kSentDir)) return false;  // Creates the notes folder too.
   if (!ringBuffer) {
-    ringBuffer = static_cast<int16_t*>(heap_caps_malloc(kRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    ringBuffer = HalMemory::allocatePsram(kRingSamples * sizeof(int16_t));
     if (!ringBuffer) {
       LOG_ERR("VOICE", "No memory for the audio buffer");
       return false;
@@ -110,33 +110,30 @@ bool startRecording(const Place& place) {
 
   clientId = newClientId();
   audioPath = partPath(clientId);
+  const auto abandon = [] {
+    audioFile.close();
+    Storage.remove(audioPath.c_str());
+    Storage.remove((std::string(kNotesDir) + "/" + clientId + ".json").c_str());
+    return false;
+  };
   // The quote and place are saved before any audio, so a power cut still leaves a complete note.
   if (!writeMeta(clientId, place) || !Storage.openFileForWrite("VOICE", audioPath, audioFile) ||
       !writeHeader(audioFile, 0)) {
     LOG_ERR("VOICE", "Could not create the note on the card");
-    audioFile.close();
-    Storage.remove(audioPath.c_str());
-    Storage.remove((std::string(kNotesDir) + "/" + clientId + ".json").c_str());
-    return false;
+    return abandon();
   }
 
   dataBytes = 0;
-  ring.attach(ringBuffer, kRingSamples);
+  ring.attach(reinterpret_cast<int16_t*>(ringBuffer.get()), kRingSamples);
   if (!mic.begin(kSampleRate)) {
     LOG_ERR("VOICE", "Microphone did not start");
-    audioFile.close();
-    Storage.remove(audioPath.c_str());
-    Storage.remove((std::string(kNotesDir) + "/" + clientId + ".json").c_str());
-    return false;
+    return abandon();
   }
   micRunning = true;
   if (xTaskCreatePinnedToCore(micTask, "voiceMic", 4096, nullptr, 5, nullptr, 0) != pdPASS) {
     micRunning = false;
     mic.end();
-    audioFile.close();
-    Storage.remove(audioPath.c_str());
-    Storage.remove((std::string(kNotesDir) + "/" + clientId + ".json").c_str());
-    return false;
+    return abandon();
   }
   recording = true;
   LOG_INF("VOICE", "Recording %s", clientId.c_str());
@@ -153,11 +150,13 @@ void pumpRecording() {
   while (const size_t count = ring.peek(&samples, kPumpMaxSamples)) {
     const size_t bytes = count * sizeof(int16_t);
     const size_t written = audioFile.write(samples, bytes);
-    // Count only whole samples, so a short write cannot leave the rest of the audio misaligned.
+    // Count only whole samples. After a short write, the next one starts over the half sample it may have left,
+    // so the rest of the audio stays aligned.
     ring.consume(written / sizeof(int16_t));
     dataBytes += written & ~static_cast<size_t>(1);
     if (written != bytes) {
       LOG_ERR("VOICE", "Card write failed after %lu bytes", static_cast<unsigned long>(dataBytes));
+      audioFile.seek(kWavHeaderBytes + dataBytes);
       return;
     }
   }

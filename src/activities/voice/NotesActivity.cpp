@@ -4,7 +4,6 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Memory.h>
-#include <WiFi.h>
 
 #include "activities/ActivityManager.h"
 #include "activities/reader/AutoProgressSync.h"
@@ -21,17 +20,29 @@
 namespace fui = freeink::ui;
 
 namespace {
-// Pure sync policies return English labels; translate only at the UI boundary.
-const char* notesLabel(const char* label) {
-  if (!label) return nullptr;
-  if (strcmp(label, "Syncing...") == 0) return tr(STR_NOTES_SYNCING);
-  if (strcmp(label, "Transcribing...") == 0) return tr(STR_NOTES_TRANSCRIBING);
-  if (strcmp(label, "Uploading audio...") == 0) return tr(STR_NOTES_UPLOADING_AUDIO);
-  if (strcmp(label, "Transcription failed") == 0) return tr(STR_NOTES_TRANSCRIPTION_FAILED);
-  if (strcmp(label, "Not set up") == 0) return tr(STR_NOTES_NOT_CONFIGURED);
-  if (strcmp(label, "Token refused") == 0) return tr(STR_NOTES_TOKEN_REFUSED);
-  if (strcmp(label, "Not synced") == 0) return tr(STR_NOTES_NOT_SYNCED);
-  return label;
+// nullptr for None.
+const char* notesLabel(const voice::NoteLabel label) {
+  switch (label) {
+    case voice::NoteLabel::None:
+      return nullptr;
+    case voice::NoteLabel::Syncing:
+      return tr(STR_NOTES_SYNCING);
+    case voice::NoteLabel::Transcribing:
+      return tr(STR_NOTES_TRANSCRIBING);
+    case voice::NoteLabel::UploadingAudio:
+      return tr(STR_NOTES_UPLOADING_AUDIO);
+    case voice::NoteLabel::TranscriptionFailed:
+      return tr(STR_NOTES_TRANSCRIPTION_FAILED);
+    case voice::NoteLabel::NotSetUp:
+      return tr(STR_NOTES_NOT_CONFIGURED);
+    case voice::NoteLabel::TokenRefused:
+      return tr(STR_NOTES_TOKEN_REFUSED);
+    case voice::NoteLabel::NeedsLogin:
+      return tr(STR_NOTES_NEEDS_LOGIN);
+    case voice::NoteLabel::NotSynced:
+      return tr(STR_NOTES_NOT_SYNCED);
+  }
+  return nullptr;
 }
 }  // namespace
 
@@ -41,7 +52,7 @@ int NotesActivity::loadRows() {
   std::string text;
   JsonDocument doc;
   // 50 notes at the API's limits. A missing file just means the first sync has not happened.
-  if (voice::readTextFile("/.sticky/transcripts.json", text, 256 * 1024) && !deserializeJson(doc, text)) {
+  if (voice::readTextFile(voice::kTranscriptsPath, text, 256 * 1024) && !deserializeJson(doc, text)) {
     for (JsonObjectConst note : doc["notes"].as<JsonArrayConst>()) {
       if (rows.size() >= kMaxRows) break;
       const char* transcript = note["text"] | "";
@@ -49,11 +60,11 @@ int NotesActivity::loadRows() {
       const char* noteStatus = note["status"] | "";
       if (voice::transcriptPending(noteStatus)) pending++;
       Row row;
-      row.title = note["bookTitle"] | "Inbox";
+      row.title = note["bookTitle"] | tr(STR_NOTES_INBOX);
       const int page = note["page"] | -1;
       if (page >= 0) row.title += " - p." + std::to_string(page + 1);
-      row.preview =
-          voice::truncateUtf8(*transcript ? transcript : notesLabel(voice::pendingNoteLabel(noteStatus)), 120);
+      const char* label = notesLabel(voice::pendingNoteLabel(noteStatus));
+      row.preview = voice::truncateUtf8(*transcript ? transcript : label ? label : "", 120);
       row.body = *quote ? std::string("\"") + quote + "\"\n\n" : std::string();
       row.body += *transcript ? transcript : tr(STR_NOTES_NO_TEXT);
       rows.push_back(std::move(row));
@@ -75,7 +86,7 @@ void NotesActivity::onEnter() {
 }
 
 void NotesActivity::onExit() {
-  if (WiFi.getMode() != WIFI_MODE_NULL) stopWifi();
+  stopWifi();
   UiListActivity::onExit();
 }
 
@@ -97,10 +108,9 @@ void NotesActivity::syncNow() {
     RenderLock lock(*this);
     voice::Config config;
     if (!voice::loadConfig(config)) {
-      status = voice::notesSyncStatus(false, true, false, false, 0);
+      status = voice::notesSyncStatus(false, true, false, false, false, 0);
     } else {
-      const bool wasConnected = WiFi.status() == WL_CONNECTED;
-      const bool online = wasConnected || (hasSavedWifi() && joinSavedWifi(autosync::kJoinTimeoutMs));
+      const bool online = connectSavedWifi(autosync::kJoinTimeoutMs);
       bool saved = false;
       voice::UploadResult result;
       if (online) {
@@ -108,7 +118,7 @@ void NotesActivity::syncNow() {
         result = voice::syncNotes(saved);
       }
       pending = loadRows();
-      status = voice::notesSyncStatus(online, result.unconfigured, result.unauthorized, saved, pending);
+      status = voice::notesSyncStatus(online, result.unconfigured, result.unauthorized, result.needsLogin, saved, pending);
       if (!online || !saved) pending = 0;  // nothing to recheck without a working connection
     }
   }
@@ -129,7 +139,7 @@ void NotesActivity::recheckTranscripts() {
     WifiPowerSaveGuard psGuard;
     const bool saved = voice::downloadTranscripts();
     pending = loadRows();
-    status = voice::notesSyncStatus(true, false, false, saved, pending);
+    status = voice::notesSyncStatus(true, false, false, false, saved, pending);
     if (!saved) pending = 0;
   }
   if (voice::shouldRecheckTranscripts(pending, rechecks)) {
@@ -142,13 +152,13 @@ void NotesActivity::recheckTranscripts() {
 
 void NotesActivity::finishSync() {
   sync = Sync::Idle;
-  // Off even if it was on before: the recorder needs it off.
-  if (WiFi.getMode() != WIFI_MODE_NULL) stopWifi();
+  // Off even if it was on before, to save battery.
+  stopWifi();
 }
 
 void NotesActivity::drawChrome() {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, "Notes",
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, tr(STR_NOTES),
                  notesLabel(status));
 }
 

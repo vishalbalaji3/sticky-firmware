@@ -433,7 +433,7 @@ void KOReaderSyncActivity::onExit() {
 
   if (wifiActivated) {
     if (automatic) {
-      stopWifi();  // the reader must reopen without a reboot, and voice notes need WiFi off
+      stopWifi();  // the reader must reopen without a reboot
       return;
     }
     WiFi.disconnect(false);

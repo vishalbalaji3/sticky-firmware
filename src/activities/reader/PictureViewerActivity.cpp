@@ -61,6 +61,7 @@ void PictureViewerActivity::loop() {
   int focusX = screenW / 2;
   int focusY = screenH / 2;
   int newZoom = zoom;
+  // Sticky exception to FreeInkUI (STICKY.md): zoom around the tapped point and drag-to-pan have no FUI component.
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     newZoom = std::min(zoom + 1, picture_viewport::MAX_ZOOM);
   } else if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {

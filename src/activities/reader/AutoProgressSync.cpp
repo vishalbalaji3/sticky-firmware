@@ -106,11 +106,12 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
                                ? KOReaderDocumentId::calculateFromFilename(path)
                                : KOReaderDocumentId::calculate(path);
   bool ok = false;
+  bool remoteAhead = false;  // A deliberate skip, which is not a failure.
   if (!hash.empty()) {
     const KOReaderProgress progress =
         buildUploadProgress(hash, ProgressMapper::toSavedProgress(epub, position), position, epub.get(), path);
     const bool wasConnected = WiFi.status() == WL_CONNECTED;
-    if (wasConnected || (hasSavedWifi() && joinSavedWifi(kJoinTimeoutMs))) {
+    if (connectSavedWifi(kJoinTimeoutMs)) {
       WiFi.setSleep(false);
       WifiPowerSaveGuard psGuard;
       KOReaderProgress remote{};
@@ -119,6 +120,7 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
                                pulled == KOReaderSyncClient::OK, remote.percentage, progress.percentage)) {
         ok = KOReaderSyncClient::updateProgress(progress) == KOReaderSyncClient::OK;
       } else {
+        remoteAhead = pulled == KOReaderSyncClient::OK;
         LOG_DBG("KOSync", "Exit push skipped: remote %.4f from %s, local %.4f", remote.percentage,
                 remote.device.c_str(), progress.percentage);
       }
@@ -126,7 +128,7 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
     if (!wasConnected) stopWifi();
   }
   LOG_DBG("KOSync", "Auto push %s: %s", ok ? "ok" : "failed", path.c_str());
-  record(path, ok, /*pushOnly=*/true);
+  record(path, ok || remoteAhead, /*pushOnly=*/true);
   return ok;
 }
 

@@ -119,6 +119,45 @@ inline int parseHttpStatus(const std::string& head) {
   return status;
 }
 
+// The reviews upload body from the offline ratings file, one JSON object per line. A line cut short by a power
+// cut during its write is left out, or it would make every later upload invalid JSON.
+inline std::string reviewsBody(const std::string& lines) {
+  std::string body = "{\"reviews\":[";
+  bool first = true;
+  for (size_t start = 0; start < lines.size();) {
+    size_t end = lines.find('\n', start);
+    if (end == std::string::npos) end = lines.size();
+    if (end > start && lines[start] == '{' && lines[end - 1] == '}') {
+      if (!first) body += ',';
+      body.append(lines, start, end - start);
+      first = false;
+    }
+    start = end + 1;
+  }
+  return body + "]}";
+}
+
+// The Content-Length of a response head, or -1 when it has none (a streamed body that ends at close).
+inline long parseContentLength(const std::string& head) {
+  for (size_t line = head.find("\r\n"); line != std::string::npos; line = head.find("\r\n", line + 2)) {
+    static constexpr char kName[] = "content-length:";
+    size_t i = 0;
+    while (i + 1 < sizeof(kName) && line + 2 + i < head.size() &&
+           (head[line + 2 + i] | 0x20) == kName[i]) {
+      ++i;
+    }
+    if (i + 1 < sizeof(kName)) continue;
+    size_t at = line + 2 + i;
+    while (at < head.size() && head[at] == ' ') ++at;
+    long length = -1;
+    for (; at < head.size() && head[at] >= '0' && head[at] <= '9'; ++at) {
+      length = (length < 0 ? 0 : length * 10) + (head[at] - '0');
+    }
+    return length;
+  }
+  return -1;
+}
+
 // Single-producer, single-consumer sample buffer. The mic task only writes and the main loop only
 // reads, so a slow e-paper refresh delays the card without stopping capture. Overflow drops the
 // newest samples and counts them, which is what the recording test needs to measure.
@@ -167,12 +206,15 @@ class SampleRing {
   std::atomic<size_t> dropped_{0};
 };
 
+// Notes app labels. The UI turns each into its translated string.
+enum class NoteLabel { None, Syncing, Transcribing, UploadingAudio, TranscriptionFailed, NotSetUp, TokenRefused, NeedsLogin, NotSynced };
+
 // Notes app: the subtitle for a note without text, from the server's status.
-inline const char* pendingNoteLabel(const char* status) {
-  if (strcmp(status, "transcribing") == 0) return "Transcribing...";
-  if (strcmp(status, "awaiting_audio") == 0) return "Uploading audio...";
-  if (strcmp(status, "failed") == 0) return "Transcription failed";
-  return "";
+inline NoteLabel pendingNoteLabel(const char* status) {
+  if (strcmp(status, "transcribing") == 0) return NoteLabel::Transcribing;
+  if (strcmp(status, "awaiting_audio") == 0) return NoteLabel::UploadingAudio;
+  if (strcmp(status, "failed") == 0) return NoteLabel::TranscriptionFailed;
+  return NoteLabel::None;
 }
 
 inline bool transcriptPending(const char* status) {
@@ -187,13 +229,15 @@ inline bool shouldRecheckTranscripts(const int pending, const int rechecksDone) 
   return pending > 0 && rechecksDone < kTranscriptRechecks;
 }
 
-// Notes app: the header status after a sync attempt. nullptr means up to date.
-inline const char* notesSyncStatus(const bool online, const bool unconfigured, const bool unauthorized,
-                                   const bool transcriptsSaved, const int pending) {
-  if (unconfigured) return "Not set up";
-  if (unauthorized) return "Token refused";
-  if (!online || !transcriptsSaved) return "Not synced";
-  return pending > 0 ? "Transcribing..." : nullptr;
+// Notes app: the header status after a sync attempt. None means up to date.
+// needsLogin: the network answered with a sign-in page instead of the internet.
+inline NoteLabel notesSyncStatus(const bool online, const bool unconfigured, const bool unauthorized,
+                                 const bool needsLogin, const bool transcriptsSaved, const int pending) {
+  if (unconfigured) return NoteLabel::NotSetUp;
+  if (unauthorized) return NoteLabel::TokenRefused;
+  if (needsLogin) return NoteLabel::NeedsLogin;
+  if (!online || !transcriptsSaved) return NoteLabel::NotSynced;
+  return pending > 0 ? NoteLabel::Transcribing : NoteLabel::None;
 }
 
 }  // namespace voice

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "activities/UiListActivity.h"
+#include "voice/VoiceFormat.h"
 
 // Recent voice notes with their transcripts. Opening it syncs over the saved network.
 class NotesActivity final : public UiListActivity {
@@ -39,7 +40,7 @@ class NotesActivity final : public UiListActivity {
   std::vector<Row> rows;
   std::array<freeink::ui::ListItem, kMaxRows> items;
   Sync sync = Sync::Start;
-  const char* status = "Syncing...";
+  voice::NoteLabel status = voice::NoteLabel::Syncing;
   int rechecks = 0;
   unsigned long recheckAt = 0;
 };

@@ -525,7 +525,7 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_LIBRARY), "Notes", "Japanese", tr(STR_SETTINGS_TITLE)};
+  std::vector<const char*> menuItems = {tr(STR_LIBRARY), tr(STR_NOTES), tr(STR_JAPANESE), tr(STR_SETTINGS_TITLE)};
   std::vector<UIIcon> menuIcons = {Library, Bookmark, Book, Settings};
 
   if (hasLibrarySlot()) {

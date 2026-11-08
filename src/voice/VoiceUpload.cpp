@@ -6,6 +6,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <SecureClient.h>
+#include <WiFiClient.h>
 
 #include <ctime>
 #include <functional>
@@ -24,7 +25,6 @@ namespace {
 constexpr size_t kFileChunk = 4096;
 constexpr size_t kMaxTextFile = 8 * 1024;
 constexpr int kLocalFileError = -2;
-constexpr const char* kTranscriptsPath = "/.sticky/transcripts.json";
 
 // Returns the HTTP status of the first step that did not succeed, or 200.
 int uploadNote(const Config& config, const std::string& id) {
@@ -158,16 +158,48 @@ bool downloadTo(const Config& config, const char* target, const char* path) {
   request.host = config.host;
   request.target = target;
   request.token = config.token;
-  request.onBody = [&file](const uint8_t* data, const size_t size) { file.write(data, size); };
+  bool written = true;
+  request.onBody = [&file, &written](const uint8_t* data, const size_t size) {
+    written = written && file.write(data, size) == size;
+  };
   const int status = secureRequest(request);
   file.close();
-  // Only a complete reply replaces the file, so a dropped connection keeps the old one.
-  if (status != 200) {
+  // Only a complete reply replaces the file, so a dropped connection or a full card keeps the old one.
+  if (status != 200 || !written) {
     Storage.remove(temp.c_str());
     return false;
   }
   Storage.remove(path);
   return Storage.rename(temp.c_str(), path);
+}
+
+}  // namespace
+
+namespace {
+
+// A plain-HTTP check that answers 204 on an open network. A sign-in page redirects it or answers 200 itself.
+bool behindSignInPage() {
+  constexpr const char* kHost = "connectivitycheck.gstatic.com";
+  WiFiClient client;
+  if (!client.connect(kHost, 80, 5000)) return false;  // No internet at all, not a sign-in page.
+  client.print("GET /generate_204 HTTP/1.0\r\nHost: ");
+  client.print(kHost);
+  client.print("\r\nConnection: close\r\n\r\n");
+  std::string line;
+  const uint32_t start = millis();
+  while (millis() - start < 5000 && line.find("\r\n") == std::string::npos && line.size() < 64) {
+    const int c = client.read();
+    if (c >= 0) {
+      line.push_back(static_cast<char>(c));
+    } else if (!client.connected()) {
+      break;
+    } else {
+      delay(5);
+    }
+  }
+  client.stop();
+  const int status = parseHttpStatus(line);
+  return status > 0 && status != 204;
 }
 
 }  // namespace
@@ -185,9 +217,11 @@ UploadResult syncNotes(bool& transcriptsSaved) {
   }
   timezones::applyToClock();  // configTime() replaced the zone the rest of the UI displays in.
 
-  const UploadResult result = uploadQueuedNotes();
+  UploadResult result = uploadQueuedNotes();
   pruneSentNotes();
   transcriptsSaved = !result.unconfigured && !result.unreachable && !result.unauthorized && downloadTranscripts();
+  // Only probed after a failure, so a working network pays nothing. The pinned TLS check fails on a sign-in page.
+  if (!transcriptsSaved && !result.unconfigured && !result.unauthorized) result.needsLogin = behindSignInPage();
   if (transcriptsSaved) syncHome();  // The lock screen design and wallpaper ride along on Notes' Wi-Fi.
   return result;
 }
@@ -199,15 +233,7 @@ void syncCardsAndHome() {
   std::string pending;
   bool reviewsSent = true;
   if (Storage.exists(kReviewsPath) && readTextFile(kReviewsPath, pending, 256 * 1024) && !pending.empty()) {
-    std::string body = "{\"reviews\":[";
-    for (size_t start = 0; start < pending.size();) {
-      size_t end = pending.find('\n', start);
-      if (end == std::string::npos) end = pending.size();
-      if (start != 0) body += ',';
-      body.append(pending, start, end - start);
-      start = end + 1;
-    }
-    body += "]}";
+    const std::string body = reviewsBody(pending);
     Request request;
     request.host = config.host;
     request.method = "POST";

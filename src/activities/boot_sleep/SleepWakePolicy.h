@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string_view>
+
 // Sleep and wake decisions, free of hardware so host tests can cover them.
 namespace sleepwake {
 
@@ -15,6 +17,19 @@ constexpr StickyScreen stickyScreenFor(const bool fromTimeout, const bool inRead
 constexpr bool wakeReopensBook(const bool hasOpenBook, const bool sleptInReader, const bool backHeld,
                                const bool readerCrashed) {
   return hasOpenBook && sleptInReader && !backHeld && !readerCrashed;
+}
+
+// A wake outside the reader returns to the app it slept in. Its sub-screens (a settings page, an OPDS feed)
+// reopen at that app's top; screens that need a live session (File Transfer, a sync) go home.
+enum class WakeApp { Home, Library, Notes, Cards, Settings, FileBrowser };
+
+constexpr WakeApp wakeAppFor(const std::string_view sleptIn) {
+  if (sleptIn == "Library" || sleptIn == "OpdsBookBrowser") return WakeApp::Library;
+  if (sleptIn == "Notes") return WakeApp::Notes;
+  if (sleptIn == "Cards") return WakeApp::Cards;
+  if (sleptIn == "Settings" || sleptIn == "SettingsList") return WakeApp::Settings;
+  if (sleptIn == "FileBrowser") return WakeApp::FileBrowser;
+  return WakeApp::Home;
 }
 
 // Sticky: a third-button wake still held this long after boot records a voice note; an earlier release is a click.

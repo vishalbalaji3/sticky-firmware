@@ -11,7 +11,8 @@ namespace voice {
 
 // One verified HTTPS exchange. The SDK's HTTP client needs the whole body in memory, but audio can
 // be far larger than PSRAM, so this streams both ways. It asks for HTTP/1.0 so responses are never
-// chunked. Returns the status, or -1 if the connection or certificate check failed.
+// chunked. Returns the status, or -1 if the connection or certificate check failed or the body arrived
+// shorter than its Content-Length.
 struct Request {
   std::string host;
   const char* method = "GET";
@@ -33,7 +34,6 @@ bool readTextFile(const std::string& path, std::string& out, size_t maxBytes = 8
 struct Config {
   std::string host;
   std::string token;
-  std::string tvHost;
 };
 bool loadConfig(Config& config);
 

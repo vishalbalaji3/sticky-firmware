@@ -1,9 +1,9 @@
 #include "HttpDownloader.h"
 
 #include <Arduino.h>
+#include <HalMemory.h>
 #include <Logging.h>
 #include <ResumableFetch.h>
-#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <functional>
@@ -283,8 +283,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     return FILE_ERROR;
   }
 
-  const std::unique_ptr<uint8_t, decltype(&heap_caps_free)> block(
-      static_cast<uint8_t*>(heap_caps_malloc(DOWNLOAD_WRITE_BLOCK, MALLOC_CAP_SPIRAM)), heap_caps_free);
+  const HalMemory::PsramBuffer block = HalMemory::allocatePsram(DOWNLOAD_WRITE_BLOCK);
   WriteBatcher batcher(block.get(), DOWNLOAD_WRITE_BLOCK,
                        [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; });
   freeink::FetchSink sink;

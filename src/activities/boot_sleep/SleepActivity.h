@@ -1,7 +1,6 @@
 #pragma once
 #include <ArduinoJson.h>
 
-#include <functional>
 #include <string>
 
 #include "activities/Activity.h"
@@ -19,6 +18,7 @@ class SleepActivity final : public Activity {
   void renderDefaultSleepScreen() const;
   void renderCustomSleepScreen() const;
   void renderLockScreen() const;
+  void drawLockOverlay(const JsonDocument& doc, bool band) const;
   void drawDateBand(const JsonDocument& doc) const;
   void drawAsleepMarker(bool compact = false) const;
   void drawMoon(int x, int y, int size) const;
@@ -37,5 +37,7 @@ class SleepActivity final : public Activity {
   mutable const Bitmap* overlayCover = nullptr;
   mutable const Bitmap* overlayGrayCover = nullptr;
   // The lock screen's band and marker, drawn by renderBitmapSleepScreen into each pass of the wallpaper's paint.
-  mutable std::function<void()> lockOverlay;
+  // Null outside renderLockScreen.
+  mutable const JsonDocument* lockOverlayDoc = nullptr;
+  mutable bool lockOverlayBand = false;
 };

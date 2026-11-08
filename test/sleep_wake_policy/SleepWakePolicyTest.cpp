@@ -42,3 +42,13 @@ TEST(SleepWakePolicy, MoonSitsRightOfTheReaderBatteryCluster) {
   EXPECT_EQ(moon.x, 10 + 45 + 6);
   EXPECT_EQ(moon.y, 770);  // same height as the icon
 }
+
+TEST(SleepWakePolicy, WakeReturnsToTheAppItSleptIn) {
+  using sleepwake::WakeApp;
+  EXPECT_EQ(sleepwake::wakeAppFor("Notes"), WakeApp::Notes);
+  EXPECT_EQ(sleepwake::wakeAppFor("Cards"), WakeApp::Cards);
+  EXPECT_EQ(sleepwake::wakeAppFor("OpdsBookBrowser"), WakeApp::Library);
+  EXPECT_EQ(sleepwake::wakeAppFor("SettingsList"), WakeApp::Settings);
+  EXPECT_EQ(sleepwake::wakeAppFor("CrossPointWebServer"), WakeApp::Home);  // the session is gone after sleep
+  EXPECT_EQ(sleepwake::wakeAppFor(""), WakeApp::Home);
+}

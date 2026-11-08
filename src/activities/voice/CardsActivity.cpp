@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <I18n.h>
 #include <Logging.h>
 
 #include <algorithm>
@@ -11,28 +12,32 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "activities/ActivityManager.h"
-#include <WiFi.h>
-
 #include "activities/reader/AutoProgressSync.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/SavedWifi.h"
 #include "network/WifiPowerSaveGuard.h"
-#include "remote/WsFrame.h"
 #include "voice/SecureRequest.h"
 #include "voice/VoiceFormat.h"
 #include "voice/VoiceNotes.h"
 #include "voice/VoiceUpload.h"
 
 namespace {
-constexpr const char* kLabels[] = {"Again", "Hard", "Good", "Easy"};
+constexpr StrId kLabels[] = {StrId::STR_CARDS_AGAIN, StrId::STR_CARDS_HARD, StrId::STR_CARDS_GOOD,
+                             StrId::STR_CARDS_EASY};
+// Card-specific sizes, measured from the content area so a bezel inset or rotation moves them with it.
 constexpr int kRatingBarHeight = 110;
 constexpr float kCardFontPointSize = 18.0f;
 constexpr int kToggleWidth = 130;
 constexpr int kToggleHeight = 50;
+constexpr int kToggleInset = 8;
+constexpr int kProgressY = 24;
+constexpr int kCardTop = 90;
+constexpr int kHintFromBottom = 60;
+constexpr int kLineGap = 6;
 
-bool inFuriganaToggle(const int x, const int y, const int width) {
-  return x >= width - kToggleWidth - 8 && y <= kToggleHeight + 8;
+bool inside(const Rect& r, const int x, const int y) {
+  return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
 }
 }  // namespace
 
@@ -42,21 +47,33 @@ void CardsActivity::onEnter() {
   requestUpdate();
 }
 
+Rect CardsActivity::toggleRect() const {
+  const Rect content = UITheme::getContentArea(renderer);
+  return Rect{content.x + content.width - kToggleWidth - kToggleInset, content.y + kToggleInset, kToggleWidth,
+              kToggleHeight};
+}
+
+Rect CardsActivity::ratingBarRect() const {
+  const Rect content = UITheme::getContentArea(renderer);
+  return Rect{content.x, content.y + content.height - kRatingBarHeight, content.width, kRatingBarHeight};
+}
+
 void CardsActivity::onExit() {
   // Ratings go up on leaving (Back or sleep), like the reader's exit push. ActivityManager holds the render lock.
   if (Storage.exists(voice::kReviewsPath) && !voice::isRecording()) {
-    GUI.drawPopup(renderer, "Syncing cards...");
-    if (WiFi.status() == WL_CONNECTED || (hasSavedWifi() && joinSavedWifi(autosync::kJoinTimeoutMs))) {
+    GUI.drawPopup(renderer, tr(STR_CARDS_SYNCING));
+    if (connectSavedWifi(autosync::kJoinTimeoutMs)) {
       WifiPowerSaveGuard psGuard;
       voice::syncCardsAndHome();
     }
   }
-  if (WiFi.getMode() != WIFI_MODE_NULL) stopWifi();
+  stopWifi();
   Activity::onExit();
 }
 
 void CardsActivity::loadCards() {
   cards.clear();
+  laidOutIndex = SIZE_MAX;
   index = 0;
   revealed = false;
   furigana = false;
@@ -89,25 +106,28 @@ void CardsActivity::syncNow() {
   {
     // The card shares SPI with the display, and the cards change under the render task.
     RenderLock lock(*this);
-    const bool online =
-        WiFi.status() == WL_CONNECTED || (hasSavedWifi() && joinSavedWifi(autosync::kJoinTimeoutMs));
-    if (online) {
+    if (connectSavedWifi(autosync::kJoinTimeoutMs)) {
       WifiPowerSaveGuard psGuard;
       voice::syncCardsAndHome();
       loadCards();
     }
   }
-  // Off as soon as it is done: the recorder needs it off.
-  if (WiFi.getMode() != WIFI_MODE_NULL) stopWifi();
+  // Off as soon as it is done, to save battery.
+  stopWifi();
   requestUpdate();
 }
 
 void CardsActivity::rate(const int rating) {
   const Card& card = cards[index];
-  std::string line = "{\"cardId\":\"" + card.id + "\",\"rating\":" + std::to_string(rating);
+  JsonDocument review;
+  review["cardId"] = card.id;
+  review["rating"] = rating;
   const time_t now = time(nullptr);
-  if (now >= voice::kFirstValidUnixTime) line += ",\"reviewedAt\":" + std::to_string(static_cast<uint64_t>(now) * 1000);
-  line += ",\"expectedLastReview\":" + card.lastReview + "}\n";
+  if (now >= voice::kFirstValidUnixTime) review["reviewedAt"] = static_cast<uint64_t>(now) * 1000;
+  review["expectedLastReview"] = serialized(card.lastReview);
+  std::string line;
+  serializeJson(review, line);
+  line += '\n';
 
   HalFile file = Storage.open(voice::kReviewsPath, O_WRONLY | O_CREAT | O_APPEND);
   if (!file.isOpen() || file.write(line.data(), line.size()) != line.size()) {
@@ -132,10 +152,11 @@ void CardsActivity::loop() {
     return;
   }
   if (index >= cards.size()) return;
+  // Sticky exception to FreeInkUI (STICKY.md): the furigana card text has no FUI component.
   int x;
   int y;
   if (!mappedInput.wasScreenTapped(x, y)) return;
-  if (!cards[index].ruby.empty() && inFuriganaToggle(x, y, renderer.getScreenWidth())) {
+  if (!cards[index].ruby.empty() && inside(toggleRect(), x, y)) {
     furigana = !furigana;
     requestUpdate();
     return;
@@ -145,122 +166,152 @@ void CardsActivity::loop() {
     requestUpdate();
     return;
   }
-  const int barTop = renderer.getScreenHeight() - kRatingBarHeight;
-  const int cell = remote::gridCell(x, y, barTop, renderer.getScreenWidth(), kRatingBarHeight, 4, 1);
-  if (cell >= 0) rate(cell + 1);
+  // Four equal buttons, Again to Easy.
+  const Rect bar = ratingBarRect();
+  if (inside(bar, x, y)) rate((x - bar.x) * 4 / bar.width + 1);
 }
 
-void CardsActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-  const int width = renderer.getScreenWidth();
-  const int height = renderer.getScreenHeight();
-  if (index >= cards.size()) {
-    renderer.drawCenteredText(
-        UI_12_FONT_ID, height / 2,
-        cards.empty() ? syncPending ? "Syncing..." : "No cards due. Open again later to sync." : "All done until next sync.");
-    renderer.displayBuffer();
-    return;
-  }
-
+// Runs once per card, so a repaint (reveal, furigana) only draws.
+void CardsActivity::layoutCard(const int maxWidth) {
+  laidOutIndex = index;
   const Card& card = cards[index];
-  const std::string progress = std::to_string(index + 1) + " / " + std::to_string(cards.size());
-  renderer.drawCenteredText(UI_10_FONT_ID, 24, progress.c_str());
-
-  int cardFont = SETTINGS.getReaderFontId();
-  const int larger = renderer.resolveFontVariant(cardFont, kCardFontPointSize / SETTINGS.fontPointSize);
-  if (larger != 0) cardFont = larger;
-
-  int y = 90;
-  const auto drawBlock = [&](const std::string& text) {
+  const auto wrap = [&](const std::string& text, std::vector<std::string>& out) {
+    out.clear();
     size_t start = 0;
     while (start <= text.size()) {
       const size_t end = text.find('\n', start);
       const std::string line = text.substr(start, end == std::string::npos ? end : end - start);
-      for (const std::string& wrapped : renderer.wrappedText(cardFont, line.c_str(), width - 48, 8)) {
-        renderer.drawCenteredText(cardFont, y, wrapped.c_str());
-        y += renderer.getLineHeight(cardFont) + 6;
+      if (line.empty()) {
+        out.emplace_back();  // An empty entry is a paragraph gap.
+      } else {
+        for (std::string& wrapped : renderer.wrappedText(cardFont, line.c_str(), maxWidth, 8)) {
+          out.push_back(std::move(wrapped));
+        }
       }
-      if (line.empty()) y += renderer.getLineHeight(cardFont) / 2;
       if (end == std::string::npos) break;
       start = end + 1;
     }
   };
-  if (!card.ruby.empty()) {
-    const int left = width - kToggleWidth - 8;
-    if (furigana) {
-      renderer.fillRect(left, 8, kToggleWidth, kToggleHeight);
-    } else {
-      renderer.drawRect(left, 8, kToggleWidth, kToggleHeight);
+  wrap(card.front, frontLines);
+  wrap(card.back, backLines);
+
+  // Readings sit above their text. A segment with a reading never splits; plain text breaks per character.
+  rubyLines.assign(1, {});
+  if (card.ruby.empty()) return;
+  int lineWidth = 0;
+  const auto add = [&](std::string text, std::string reading) {
+    const int w = std::max(renderer.getTextWidth(cardFont, text.c_str()),
+                           reading.empty() ? 0 : renderer.getTextWidth(UI_10_FONT_ID, reading.c_str()));
+    if (lineWidth + w > maxWidth && !rubyLines.back().empty()) {
+      rubyLines.emplace_back();
+      lineWidth = 0;
     }
-    const int labelWidth = renderer.getTextWidth(UI_10_FONT_ID, "Furigana");
-    renderer.drawText(UI_10_FONT_ID, left + (kToggleWidth - labelWidth) / 2, 8 + kToggleHeight / 2 - 10, "Furigana",
-                      !furigana);
+    rubyLines.back().push_back({std::move(text), std::move(reading), w});
+    lineWidth += w;
+  };
+  for (const auto& [text, reading] : card.ruby) {
+    if (!reading.empty()) {
+      add(text, reading);
+      continue;
+    }
+    for (size_t i = 0; i < text.size();) {
+      size_t n = 1;
+      while (i + n < text.size() && (static_cast<unsigned char>(text[i + n]) & 0xC0) == 0x80) n++;
+      add(text.substr(i, n), "");
+      i += n;
+    }
+  }
+}
+
+int CardsActivity::drawLines(const std::vector<std::string>& lines, int y) const {
+  for (const std::string& line : lines) {
+    if (line.empty()) {
+      y += renderer.getLineHeight(cardFont) / 2;
+      continue;
+    }
+    renderer.drawCenteredText(cardFont, y, line.c_str());
+    y += renderer.getLineHeight(cardFont) + kLineGap;
+  }
+  return y;
+}
+
+int CardsActivity::drawRubyLines(int y) const {
+  const Rect content = UITheme::getContentArea(renderer);
+  const int readingHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  for (const auto& line : rubyLines) {
+    int total = 0;
+    for (const Piece& piece : line) total += piece.width;
+    int x = content.x + (content.width - total) / 2;
+    for (const Piece& piece : line) {
+      if (!piece.reading.empty()) {
+        renderer.drawText(UI_10_FONT_ID,
+                          x + (piece.width - renderer.getTextWidth(UI_10_FONT_ID, piece.reading.c_str())) / 2, y,
+                          piece.reading.c_str());
+      }
+      renderer.drawText(cardFont, x + (piece.width - renderer.getTextWidth(cardFont, piece.text.c_str())) / 2,
+                        y + readingHeight, piece.text.c_str());
+      x += piece.width;
+    }
+    y += readingHeight + renderer.getLineHeight(cardFont) + kLineGap;
+  }
+  return y;
+}
+
+void CardsActivity::render(RenderLock&&) {
+  renderer.clearScreen();
+  const Rect content = UITheme::getContentArea(renderer);
+  if (index >= cards.size()) {
+    renderer.drawCenteredText(
+        UI_12_FONT_ID, content.y + content.height / 2,
+        cards.empty() ? syncPending ? tr(STR_NOTES_SYNCING) : tr(STR_CARDS_NONE_DUE) : tr(STR_CARDS_ALL_DONE));
+    renderer.displayBuffer();
+    return;
   }
 
-  if (furigana && !card.ruby.empty()) {
-    // Readings sit above their text. A segment with a reading never splits; plain text breaks per character.
-    struct Piece {
-      std::string text;
-      std::string reading;
-      int width;
-    };
-    std::vector<std::vector<Piece>> lines(1);
-    int lineWidth = 0;
-    const auto add = [&](const std::string& text, const std::string& reading) {
-      const int w = std::max(renderer.getTextWidth(cardFont, text.c_str()),
-                             reading.empty() ? 0 : renderer.getTextWidth(UI_10_FONT_ID, reading.c_str()));
-      if (lineWidth + w > width - 48 && !lines.back().empty()) {
-        lines.emplace_back();
-        lineWidth = 0;
-      }
-      lines.back().push_back({text, reading, w});
-      lineWidth += w;
-    };
-    for (const auto& [text, reading] : card.ruby) {
-      if (!reading.empty()) {
-        add(text, reading);
-        continue;
-      }
-      for (size_t i = 0; i < text.size();) {
-        size_t n = 1;
-        while (i + n < text.size() && (static_cast<unsigned char>(text[i + n]) & 0xC0) == 0x80) n++;
-        add(text.substr(i, n), "");
-        i += n;
-      }
-    }
-    const int readingHeight = renderer.getLineHeight(UI_10_FONT_ID);
-    for (const auto& line : lines) {
-      int total = 0;
-      for (const Piece& piece : line) total += piece.width;
-      int x = (width - total) / 2;
-      for (const Piece& piece : line) {
-        if (!piece.reading.empty()) {
-          renderer.drawText(UI_10_FONT_ID, x + (piece.width - renderer.getTextWidth(UI_10_FONT_ID, piece.reading.c_str())) / 2,
-                            y, piece.reading.c_str());
-        }
-        renderer.drawText(cardFont, x + (piece.width - renderer.getTextWidth(cardFont, piece.text.c_str())) / 2,
-                          y + readingHeight, piece.text.c_str());
-        x += piece.width;
-      }
-      y += readingHeight + renderer.getLineHeight(cardFont) + 6;
-    }
-  } else {
-    drawBlock(card.front);
+  char progress[24];
+  snprintf(progress, sizeof(progress), "%u / %u", static_cast<unsigned>(index + 1),
+           static_cast<unsigned>(cards.size()));
+  renderer.drawCenteredText(UI_10_FONT_ID, content.y + kProgressY, progress);
+
+  if (laidOutIndex != index) {
+    cardFont = SETTINGS.getReaderFontId();
+    const int larger = renderer.resolveFontVariant(cardFont, kCardFontPointSize / SETTINGS.fontPointSize);
+    if (larger != 0) cardFont = larger;
+    const int sidePadding = UITheme::getInstance().getMetrics().contentSidePadding;
+    layoutCard(content.width - 2 * sidePadding);
   }
+
+  const Card& card = cards[index];
+  if (!card.ruby.empty()) {
+    const Rect toggle = toggleRect();
+    if (furigana) {
+      renderer.fillRect(toggle.x, toggle.y, toggle.width, toggle.height);
+    } else {
+      renderer.drawRect(toggle.x, toggle.y, toggle.width, toggle.height);
+    }
+    const char* label = tr(STR_CARDS_FURIGANA);
+    const int labelWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
+    renderer.drawText(UI_10_FONT_ID, toggle.x + (toggle.width - labelWidth) / 2, toggle.y + toggle.height / 2 - 10,
+                      label, !furigana);
+  }
+
+  int y = content.y + kCardTop;
+  y = furigana && !card.ruby.empty() ? drawRubyLines(y) : drawLines(frontLines, y);
 
   if (!revealed) {
-    renderer.drawCenteredText(UI_10_FONT_ID, height - 60, "Tap to show the answer");
+    renderer.drawCenteredText(UI_10_FONT_ID, content.y + content.height - kHintFromBottom, tr(STR_CARDS_SHOW_ANSWER));
   } else {
     y += 20;
-    renderer.drawLine(40, y, width - 40, y);
+    renderer.drawLine(content.x + 40, y, content.x + content.width - 40, y);
     y += 30;
-    drawBlock(card.back);
-    const int top = height - kRatingBarHeight;
+    drawLines(backLines, y);
+    const Rect bar = ratingBarRect();
     for (int i = 0; i < 4; ++i) {
-      const int x = i * width / 4;
-      renderer.drawRect(x + 4, top + 8, width / 4 - 8, kRatingBarHeight - 16);
-      const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, kLabels[i]);
-      renderer.drawText(UI_10_FONT_ID, x + (width / 4 - textWidth) / 2, top + kRatingBarHeight / 2 - 10, kLabels[i]);
+      const int x = bar.x + i * bar.width / 4;
+      renderer.drawRect(x + 4, bar.y + 8, bar.width / 4 - 8, bar.height - 16);
+      const char* label = I18n::getInstance().get(kLabels[i]);
+      const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
+      renderer.drawText(UI_10_FONT_ID, x + (bar.width / 4 - textWidth) / 2, bar.y + bar.height / 2 - 10, label);
     }
   }
   renderer.displayBuffer();

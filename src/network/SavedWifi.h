@@ -11,7 +11,9 @@ bool hasSavedWifi();
 // One quick scan, then the saved networks in range, strongest first, until
 // one connects or timeoutMs runs out. Returns true when connected.
 bool joinSavedWifi(unsigned long timeoutMs);
-// Turns the radio fully off, so the voice recorder (which needs WiFi off) works again.
+// Already connected, or hasSavedWifi() and joinSavedWifi().
+bool connectSavedWifi(unsigned long timeoutMs);
+// Turns the radio fully off, to save battery. No-op when already off.
 void stopWifi();
 
 struct ScannedNetwork {

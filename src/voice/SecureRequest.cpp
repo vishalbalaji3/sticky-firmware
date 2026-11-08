@@ -50,6 +50,8 @@ int secureRequest(const Request& request) {
   std::string responseHead;
   int status = -1;
   bool inBody = false;
+  long expected = -1;  // Content-Length, when the server sent one.
+  size_t received = 0;
   uint8_t buffer[512];
   uint32_t lastData = millis();
   while (millis() - lastData < kResponseTimeoutMs) {
@@ -62,6 +64,7 @@ int secureRequest(const Request& request) {
     if (got <= 0) continue;
     lastData = millis();
     if (inBody) {
+      received += got;
       if (request.onBody) request.onBody(buffer, got);
       continue;
     }
@@ -69,12 +72,20 @@ int secureRequest(const Request& request) {
     const size_t end = responseHead.find("\r\n\r\n");
     if (end == std::string::npos) continue;
     status = parseHttpStatus(responseHead);
+    expected = parseContentLength(responseHead.substr(0, end + 2));
     inBody = true;
-    if (request.onBody && responseHead.size() > end + 4) {
-      request.onBody(reinterpret_cast<const uint8_t*>(responseHead.data()) + end + 4, responseHead.size() - end - 4);
+    received = responseHead.size() - end - 4;
+    if (request.onBody && received > 0) {
+      request.onBody(reinterpret_cast<const uint8_t*>(responseHead.data()) + end + 4, received);
     }
   }
   client.stop();
+  // A connection that dropped mid-body still parsed a status. Without a Content-Length nothing can tell.
+  if (expected >= 0 && received != static_cast<size_t>(expected)) {
+    LOG_ERR("NET", "Reply from %s cut short: %u of %ld bytes", request.host.c_str(), static_cast<unsigned>(received),
+            expected);
+    return -1;
+  }
   return status;
 }
 
@@ -99,7 +110,6 @@ bool loadConfig(Config& config) {
   // shortcut: the token sits unencrypted on the card, revoke it in the PWA if the card is lost.
   config.host = doc["host"] | "";
   config.token = doc["token"] | "";
-  config.tvHost = doc["tvHost"] | "";
   return !config.host.empty() && !config.token.empty();
 }
 
