@@ -300,6 +300,10 @@ inline bool isHiddenOnDevice(const SettingInfo& s) {
     // power click (other touch boards) cover these shortcuts.
     case StrId::STR_LONG_PRESS_MENU:
       return BoardConfig::hasTouch();
+    // The Sticky ignores both: auto-sleep keeps the page, Up + Down locks (SleepWakePolicy.h).
+    case StrId::STR_SLEEP_SCREEN:
+    case StrId::STR_QUICK_RESUME_TIMEOUT:
+      return FREEINK_DEVICE_STICKY;
     default:
       return false;
   }
