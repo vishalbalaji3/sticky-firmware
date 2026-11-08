@@ -110,11 +110,17 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
     const KOReaderProgress progress =
         buildUploadProgress(hash, ProgressMapper::toSavedProgress(epub, position), position, epub.get(), path);
     const bool wasConnected = WiFi.status() == WL_CONNECTED;
-    if (wasConnected || (hasLastSavedWifi() && joinLastSavedWifi(kJoinTimeoutMs))) {
+    if (wasConnected || (hasSavedWifi() && joinSavedWifi(kJoinTimeoutMs))) {
       WiFi.setSleep(false);
-      {
-        WifiPowerSaveGuard psGuard;
+      WifiPowerSaveGuard psGuard;
+      KOReaderProgress remote{};
+      const auto pulled = KOReaderSyncClient::getProgress(hash, remote);
+      if (shouldPushOverRemote(pulled == KOReaderSyncClient::OK || pulled == KOReaderSyncClient::NOT_FOUND,
+                               pulled == KOReaderSyncClient::OK, remote.percentage, progress.percentage)) {
         ok = KOReaderSyncClient::updateProgress(progress) == KOReaderSyncClient::OK;
+      } else {
+        LOG_DBG("KOSync", "Exit push skipped: remote %.4f from %s, local %.4f", remote.percentage,
+                remote.device.c_str(), progress.percentage);
       }
     }
     if (!wasConnected) stopWifi();

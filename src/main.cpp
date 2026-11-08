@@ -415,10 +415,10 @@ static void deliverSleepPluginEvents(const bool allowNetwork) {
   if (!pluginevents::wantsConnectAny()) return;
   if (powerManager.getBatteryPercentage() < 20) return;
   // Sleep can be the first WiFi use since boot or deep-sleep wake.
-  if (!hasLastSavedWifi()) return;
+  if (!hasSavedWifi()) return;
 
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  if (joinLastSavedWifi(10000)) {
+  if (joinSavedWifi(10000)) {
     pluginevents::drain(&renderer);
   } else {
     LOG_DBG("MAIN", "Sleep-event WiFi join timed out; deferring delivery");

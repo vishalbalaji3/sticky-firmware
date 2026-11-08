@@ -167,4 +167,33 @@ class SampleRing {
   std::atomic<size_t> dropped_{0};
 };
 
+// Notes app: the subtitle for a note without text, from the server's status.
+inline const char* pendingNoteLabel(const char* status) {
+  if (strcmp(status, "transcribing") == 0) return "Transcribing...";
+  if (strcmp(status, "awaiting_audio") == 0) return "Uploading audio...";
+  if (strcmp(status, "failed") == 0) return "Transcription failed";
+  return "";
+}
+
+inline bool transcriptPending(const char* status) {
+  return strcmp(status, "transcribing") == 0 || strcmp(status, "awaiting_audio") == 0;
+}
+
+// Notes app: transcripts are fetched again while some are pending, a few times at most.
+constexpr int kTranscriptRechecks = 4;
+constexpr unsigned long kTranscriptRecheckMs = 5000;
+
+inline bool shouldRecheckTranscripts(const int pending, const int rechecksDone) {
+  return pending > 0 && rechecksDone < kTranscriptRechecks;
+}
+
+// Notes app: the header status after a sync attempt. nullptr means up to date.
+inline const char* notesSyncStatus(const bool online, const bool unconfigured, const bool unauthorized,
+                                   const bool transcriptsSaved, const int pending) {
+  if (unconfigured) return "Not set up";
+  if (unauthorized) return "Token refused";
+  if (!online || !transcriptsSaved) return "Not synced";
+  return pending > 0 ? "Transcribing..." : nullptr;
+}
+
 }  // namespace voice

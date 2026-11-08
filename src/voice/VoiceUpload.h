@@ -22,10 +22,14 @@ constexpr const char* kHomePath = "/.sticky/home.json";
 // Sends offline ratings, then downloads new cards and lock screen data. Failures leave the old files.
 void syncCardsAndHome();
 
-// Saves recent transcripts to the card for the Notes app.
-void downloadTranscripts();
+// Saves recent transcripts to the card for the Notes app. False keeps the old file.
+bool downloadTranscripts();
 
 // Deletes sent audio past its retention period.
 void pruneSentNotes();
+
+// Requires Wi-Fi: sets the clock, uploads waiting notes, prunes sent audio and downloads transcripts.
+// transcriptsSaved reports whether the transcript file was refreshed.
+UploadResult syncNotes(bool& transcriptsSaved);
 
 }  // namespace voice

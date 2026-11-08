@@ -3,12 +3,15 @@
 #include <Arduino.h>
 #include <Logging.h>
 #include <ResumableFetch.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <string>
 
 #include "WifiPowerSaveGuard.h"
+#include "WriteBatcher.h"
 
 extern "C" void wolfSSL_Arduino_Serial_Print(const char* const msg) { LOG_DBG("WOLFSSL", "%s", msg); }
 
@@ -23,6 +26,11 @@ constexpr int MAX_REDIRECTS = 5;
 // postForm response cap: token responses are small JSON; a misbehaving server
 // must not balloon the heap.
 constexpr size_t MAX_RESPONSE_BYTES = 4096;
+
+// downloadToFile gathers SD writes into one PSRAM block this size: the SD card shares the
+// display's SPI bus, and one multi-block write beats 64 small ones. Boards without PSRAM
+// get nullptr and write each record directly, as before.
+constexpr size_t DOWNLOAD_WRITE_BLOCK = 128 * 1024;
 
 void applyCommonClientSetup(freeink::SecureHttpClient& http) {
   http.setTimeout(HTTP_TIMEOUT_MS);
@@ -275,18 +283,28 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     return FILE_ERROR;
   }
 
+  const std::unique_ptr<uint8_t, decltype(&heap_caps_free)> block(
+      static_cast<uint8_t*>(heap_caps_malloc(DOWNLOAD_WRITE_BLOCK, MALLOC_CAP_SPIRAM)), heap_caps_free);
+  WriteBatcher batcher(block.get(), DOWNLOAD_WRITE_BLOCK,
+                       [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; });
   freeink::FetchSink sink;
-  sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
+  sink.write = [&batcher](const uint8_t* data, size_t len) { return batcher.write(data, len); };
   // Reopening for write truncates: the server restarted the body from byte 0.
-  sink.rewind = [&file, &partPath] {
+  sink.rewind = [&file, &partPath, &batcher] {
+    batcher.discard();
     file.close();
     return Storage.openFileForWrite("HTTP", partPath.c_str(), file);
   };
   sink.progress = progress;
 
   size_t downloaded = 0;
-  const DownloadError result =
+  const uint32_t startedMs = millis();
+  DownloadError result =
       runGetSecure(url, username, password, headers, sink, cancelFlag, &downloaded, downgradeRedirectsToHttp);
+  if (result == OK && !batcher.flush()) {
+    LOG_ERR("HTTP", "Failed to write the last block");
+    result = FILE_ERROR;
+  }
   // Close before any remove() on the same path; DESTRUCTOR_CLOSES_FILE would
   // otherwise close only after the remove. A failed rewind leaves no open handle.
   if (file.isOpen()) file.close();
@@ -305,6 +323,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     Storage.remove(partPath.c_str());
     return FILE_ERROR;
   }
-  LOG_DBG("HTTP", "Downloaded %zu bytes", downloaded);
+  const uint32_t elapsedMs = std::max<uint32_t>(millis() - startedMs, 1);
+  LOG_INF("HTTP", "Downloaded %zu bytes in %lu ms (%llu bytes/s, %s writes)", downloaded, (unsigned long)elapsedMs,
+          (unsigned long long)downloaded * 1000 / elapsedMs, block ? "batched" : "direct");
   return OK;
 }

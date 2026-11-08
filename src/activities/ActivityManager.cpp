@@ -23,6 +23,7 @@
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "components/HeaderBackTapTarget.h"
+#include "components/themes/BaseTheme.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
@@ -40,6 +41,8 @@
 #include "voice/VoiceNotes.h"
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
+// Render task only: set when the boot recording dot reached a flush.
+static bool dotFlushed = false;
 
 ActivityManager::ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {
@@ -92,9 +95,18 @@ void ActivityManager::renderTaskLoop() {
       // The sleep screen forces normal polarity itself (SleepActivity).
       display.setInverted(SETTINGS.screenInverted != 0);
       const uint32_t renderingVisit = screenVisit;
+      // A new screen records its own battery spot for the auto-sleep moon.
+      if (renderingVisit != paintedVisit.load(std::memory_order_acquire)) BaseTheme::batterySpot.valid = false;
+      // A boot recording's dot goes into this paint, not a refresh of its own.
+      const bool dotInFrame = recordingDotAfterPaint.load() && voice::isRecording();
+      if (dotInFrame) {
+        dotFlushed = false;
+        renderer.setFlushOverlay(&drawRecordingDotInto);
+      }
       currentActivity->render(std::move(lock));
+      renderer.setFlushOverlay(nullptr);
       paintedVisit.store(renderingVisit, std::memory_order_release);
-      if (recordingDotAfterPaint.exchange(false) && voice::isRecording()) {
+      if (recordingDotAfterPaint.exchange(false) && voice::isRecording() && !(dotInFrame && dotFlushed)) {
         // render() may or may not have released the lock it was handed.
         if (lock.ownsLock()) {
           paintRecordingDot();
@@ -337,8 +349,13 @@ void ActivityManager::fillVoicePlace(voice::Place& place) {
   if (currentActivity) currentActivity->addVoicePlace(place);
 }
 
+void ActivityManager::drawRecordingDotInto(const GfxRenderer& target) {
+  target.fillRoundedRect(target.getScreenWidth() - 30, 10, 18, 18, 9, Color::Black);
+  dotFlushed = true;
+}
+
 void ActivityManager::paintRecordingDot() {
-  renderer.fillRoundedRect(renderer.getScreenWidth() - 30, 10, 18, 18, 9, Color::Black);
+  drawRecordingDotInto(renderer);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
 
