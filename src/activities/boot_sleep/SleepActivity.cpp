@@ -847,7 +847,9 @@ void SleepActivity::renderLockScreen() const {
   const time_t now = time(nullptr);
   if ((halClock.localTime(today) && today.tm_year >= 124) ||
       (now >= voice::kFirstValidUnixTime && localtime_r(&now, &today))) {
-    strftime(date, sizeof(date), "%A, %B %-d", &today);
+    // newlib's strftime has no "%-d", so the day number is appended by hand.
+    const size_t len = strftime(date, sizeof(date), "%A, %B ", &today);
+    snprintf(date + len, sizeof(date) - len, "%d", today.tm_mday);
   }
 
   const int width = renderer.getScreenWidth();
