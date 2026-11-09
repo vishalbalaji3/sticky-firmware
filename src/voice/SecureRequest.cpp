@@ -35,7 +35,10 @@ int secureRequest(const Request& request) {
   }
 
   std::string head = std::string(request.method) + " " + request.target + " HTTP/1.0\r\nHost: " + request.host;
-  if (!request.token.empty()) head += "\r\nAuthorization: Bearer " + request.token;
+  if (!request.token.empty()) {
+    // The server shows this on the PWA's Devices page.
+    head += "\r\nAuthorization: Bearer " + request.token + "\r\nX-Sticky-Firmware: " CROSSPOINT_VERSION;
+  }
   if (request.contentType) {
     head += std::string("\r\nContent-Type: ") + request.contentType +
             "\r\nContent-Length: " + std::to_string(request.bodyLength);
