@@ -789,10 +789,14 @@ bool SleepActivity::renderCustomSleepBmp(const std::string& path) const {
     // Like book covers: scale and dither once into a cached screen-sized BMP, then draw it without dithering.
     const bool crop = SETTINGS.sleepScreenCoverMode == CrossPointSettings::SLEEP_SCREEN_COVER_MODE::CROP;
     // Same-sized BMPs share a byte count, so the key also needs the modification time.
+    // Nothing gives the SD library the time, so every downloaded wallpaper has the same modification time, and at
+    // screen size the same byte count too: its id from the PWA is what tells them apart.
+    std::string version;
+    if (path == voice::kWallpaperPath) voice::readTextFile(voice::kWallpaperIdPath, version);
     const std::string key = path + '|' + std::to_string(file.size()) + '|' + std::to_string(file.modificationTime()) +
                             '|' + std::to_string(renderer.getScreenWidth()) + 'x' +
                             std::to_string(renderer.getScreenHeight()) + (crop ? "|c" : "|f") +
-                            (thresholds ? "|t" : "");
+                            (thresholds ? "|t" : "") + '|' + version;
     const std::string cachePath = "/.crosspoint/sleep_" + std::to_string(std::hash<std::string>{}(key)) + ".bmp";
     if (!Storage.exists(cachePath.c_str())) {
       const std::string tmpPath = cachePath + ".tmp";
