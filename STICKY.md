@@ -38,7 +38,7 @@ git checkout sticky-os && git submodule update --init   # SDK is our fork: visha
   - Requests use HTTP/1.0 to avoid chunked bodies.
 - **SD and the e-paper share one SPI bus (SCK13/MOSI14).** Voice capture goes through a PSRAM ring on core 0, so display refreshes don't drop samples. 0 dropped has been verified.
 - **Buttons: Up GPIO5, Down GPIO6, third button GPIO4 (power, AI and confirm in one).**
-  - A click is Confirm/Menu (injected in `main.cpp`), and wakes from sleep. Holding records. Up+Down locks. Use touch Back to return; the wake click and recording release do not activate a menu. CrossNext uses its native list reader menu on Sticky so physical navigation stays available.
+  - A click is Confirm/Menu (injected in `main.cpp`), and wakes from sleep. Holding records. Up+Down locks. Swipe up from the bottom edge of the reader to go Home. Use touch Back to return; the wake click and recording release do not activate a menu. CrossNext uses its native list reader menu on Sticky so physical navigation stays available.
   - `shortPwrBtn` is forced to IGNORE on the Sticky, so the stock ghost-wake hold check is skipped there.
 - **Deep-sleep wake is a full reboot.** Anything that must react to a held button (hold-to-record from sleep) has to act early in `setup()`.
 - **Battery gauge BQ27220 0x55 on Wire1 (SDA1/SCL0), shared with PCF8563 RTC 0x51, SHT40 0x44, LSM6DS3 0x6A.** Touch (GT911) is on its own bus (SDA3/SCL2).

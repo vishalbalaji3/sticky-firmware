@@ -403,7 +403,12 @@ bool MappedInputManager::wasMenuGesture() const { return wasTopEdgeDownSwipe(); 
 
 bool MappedInputManager::wasReaderMenuSwipeUp() const { return gpio.hasHomeKey() && wasBottomEdgeUpSwipe(); }
 bool MappedInputManager::wasReaderTextSettingsGesture() const {
+#if FREEINK_DEVICE_STICKY
+  // Sticky reserves the bottom-edge swipe for Home; text settings stay in the reader menu.
+  return homeAction == HomeButtonAction::ReaderMenu;
+#else
   return homeAction == HomeButtonAction::ReaderMenu || wasBottomEdgeUpSwipe();
+#endif
 }
 
 bool MappedInputManager::wasHomeGesture() const {
