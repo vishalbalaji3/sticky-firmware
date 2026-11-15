@@ -74,3 +74,7 @@ boot/version plus reading, controls and voice capture on the physical device.
 - Production cloud deployment is Ready at
   https://sticky-cloud-ginfgc1ou-vishalbalaji3s-projects.vercel.app and the public site
   https://sticky-cloud.vercel.app returns HTTP 200.
+
+Final smoke test: AI Notes displayed the cached list and opened a transcription with
+third-button Confirm. Japanese displayed its 45-card deck and completed a TLS 1.3
+backend handshake. Device was returned to Home; the USB test bridge was closed.
