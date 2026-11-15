@@ -19,7 +19,6 @@ struct DirectPixelWriter {
   uint8_t* fb;
   GfxRenderer::RenderMode mode;
   bool absolute = false;
-  bool ditherBw = false;       // images on a B/W-only page: dither in BW, skip the gray planes
   uint16_t displayWidthBytes;  // Runtime framebuffer stride (X4: 100, X3: 99)
   // Active write target: for tiled grayscale, fb is the band scratch, originY is
   // the band's top physical row, and clipRows is the band height. Off-band
@@ -37,7 +36,6 @@ struct DirectPixelWriter {
 
   // Row-precomputed: the Y-dependent portion of the physical coords
   int rowPhyXBase, rowPhyYBase;
-  int rowLogicalY;
 
   void init(GfxRenderer& renderer) {
     fb = renderer.getWriteTarget();
@@ -45,7 +43,6 @@ struct DirectPixelWriter {
     clipRows = renderer.getWriteRows();
     mode = renderer.getRenderMode();
     absolute = renderer.grayPlanesAreAbsolute();
-    ditherBw = renderer.imagesDitheredInBw();
     displayWidthBytes = renderer.getDisplayWidthBytes();
 
     const int phyW = renderer.getDisplayWidth();
@@ -103,7 +100,6 @@ struct DirectPixelWriter {
   // Call once per row before the column loop.
   // Pre-computes the Y-dependent portion so writePixel() only needs the X part.
   inline void beginRow(int logicalY) {
-    rowLogicalY = logicalY;
     rowPhyXBase = phyXBase + logicalY * phyXStepY;
     rowPhyYBase = phyYBase + logicalY * phyYStepY;
   }
@@ -157,19 +153,11 @@ struct DirectPixelWriter {
     bool state;
     switch (mode) {
       case GfxRenderer::BW:
-        if (ditherBw) {
-          // 2x2 Bayer cell (0 2 / 3 1): dark gray inks 3 of 4 pixels, light gray 1 of 4.
-          static constexpr uint8_t BAYER[4] = {0, 2, 3, 1};
-          const uint8_t threshold = BAYER[((rowLogicalY & 1) << 1) | (logicalX & 1)];
-          state = pixelValue == 0 || (pixelValue == 1 && threshold < 3) || (pixelValue == 2 && threshold < 1);
-        } else {
-          state = pixelValue < 3;
-        }
-        draw = writeWhiteInBw || state;
+        draw = writeWhiteInBw || pixelValue < 3;
+        state = pixelValue < 3;
         break;
       case GfxRenderer::GRAYSCALE_MSB:
       case GfxRenderer::GRAYSCALE_LSB: {
-        if (ditherBw) return;  // the text-AA pass must leave the dithered image as drawn
         const auto pixel = grayPlanePixel(pixelValue, mode == GfxRenderer::GRAYSCALE_MSB, absolute);
         draw = pixel.write;
         state = pixel.black;

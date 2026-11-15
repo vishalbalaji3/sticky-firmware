@@ -11,6 +11,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "SdCardFontSystem.h"
 #include "activities/ActivityManager.h"
 #include "activities/reader/AutoProgressSync.h"
 #include "components/UITheme.h"
@@ -27,7 +28,6 @@ constexpr StrId kLabels[] = {StrId::STR_CARDS_AGAIN, StrId::STR_CARDS_HARD, StrI
                              StrId::STR_CARDS_EASY};
 // Card-specific sizes, measured from the content area so a bezel inset or rotation moves them with it.
 constexpr int kRatingBarHeight = 110;
-constexpr float kCardFontPointSize = 18.0f;
 constexpr int kToggleWidth = 130;
 constexpr int kToggleHeight = 50;
 constexpr int kToggleInset = 8;
@@ -274,9 +274,7 @@ void CardsActivity::render(RenderLock&&) {
   renderer.drawCenteredText(UI_10_FONT_ID, content.y + kProgressY, progress);
 
   if (laidOutIndex != index) {
-    cardFont = SETTINGS.getReaderFontId();
-    const int larger = renderer.resolveFontVariant(cardFont, kCardFontPointSize / SETTINGS.fontPointSize);
-    if (larger != 0) cardFont = larger;
+    cardFont = sdFontSystem.cardFontId(renderer);
     const int sidePadding = UITheme::getInstance().getMetrics().contentSidePadding;
     layoutCard(content.width - 2 * sidePadding);
   }

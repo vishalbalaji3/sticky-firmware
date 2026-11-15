@@ -4,6 +4,7 @@
 #include <I18n.h>
 
 #include "MappedInputManager.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 
@@ -38,6 +39,7 @@ constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 
 NetworkModeSelectionActivity::NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : UiListActivity("NetworkModeSelection", renderer, mappedInput) {
+  setInterfaceFontSection(menufont::Section::Transfer);
   // Entirely static, so built once here rather than every buildScreen() call.
   for (int i = 0; i < MENU_ITEM_COUNT; i++) {
     fui::ListItem item;
@@ -63,11 +65,10 @@ void NetworkModeSelectionActivity::activateIndex(const int index) {
 }
 
 void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  // Content below the GUI.drawHeader band, above the button hints.
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  useCompactSettingsRows();
+  const int hints = mappedInput.hasTouch() ? 0 : UITheme::getInstance().getMetrics().buttonHintsHeight;
+  pixelui::begin(screen, hints);
 
   // rowItems_ was built once in the constructor and is reused here on every
   // repaint.
@@ -76,10 +77,17 @@ void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(MENU_ITEM_COUNT);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.subtitleText = screen.theme().smallText;
-  props.subtitleText.maxLines = 2;
+  pixelui::styleList(props);
+  props.rtl =
+      (I18N.getLanguage() == Language::AR || I18N.getLanguage() == Language::FA || I18N.getLanguage() == Language::HE);
   syncListViewport(screen, props);
-  screen.list(props);
+  props.partialTrailingRow = false;
+  pixelRows.bind(props, screen.target(), screen.body());
+  pixelui::list(screen, props);
+}
+
+void NetworkModeSelectionActivity::drawChrome() {
+  pixelui::drawHeader(renderer, headerTitle(), I18N.getLanguage() != Language::EN);
 }
 
 void NetworkModeSelectionActivity::onModeSelected(NetworkMode mode) {

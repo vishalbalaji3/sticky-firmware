@@ -20,16 +20,17 @@ constexpr unsigned long kJoinTimeoutMs = 8000;
 bool shouldPullOnOpen(const std::string& path);
 // Called when launching the automatic sync: the reader it reopens skips its pull once.
 void skipNextPull(const std::string& path);
-// pushOnly: the exit push, which must not suppress the next open's pull.
+// pushOnly distinguishes exit uploads from completed pull/reconciliation.
 void record(const std::string& path, bool ok, bool pushOnly = false);
 std::string statusText(const std::string& path);
+uint64_t syncScope(const std::string& document);
 
 // Upload record for the local position, shared with the manual sync.
 KOReaderProgress buildUploadProgress(const std::string& documentHash, const SavedProgressPosition& localProgress,
                                      const CrossPointPosition& localPosition, Epub* epub, const std::string& epubPath);
 
-// Blocking: joins a saved network if needed, reads the remote position, pushes unless
-// shouldPushOverRemote says no, and turns WiFi off again if it joined.
+// Blocking: joins a saved network if needed, reads the remote position, uploads
+// only when reconciliation permits it, and turns WiFi off again if it joined.
 bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& position);
 
 }  // namespace autosync

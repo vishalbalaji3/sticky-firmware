@@ -3,6 +3,7 @@
 #include <BoardConfig.h>
 
 #include "activities/UiListActivity.h"
+#include "apps_local/ui/PixelMenu.h"
 
 enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, CREATE_HOTSPOT, USB_DRIVE };
 
@@ -36,9 +37,11 @@ class NetworkModeSelectionActivity final : public UiListActivity {
   void activateIndex(int index) override;
   void onBackButton() override { onCancel(); }
   const char* headerTitle() const override;
+  void drawChrome() override;
 
   // Row storage: entirely static (label/subtitle/icon never change), so it's
   // built once in the constructor instead of every buildScreen() call, into
   // fixed-capacity storage that avoids any heap allocation for the row list.
   freeink::ui::ListItem rowItems_[MENU_ITEM_COUNT]{};
+  pixelui::RowSource pixelRows;
 };

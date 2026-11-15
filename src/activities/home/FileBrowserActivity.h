@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "activities/UiListActivity.h"
+#include "apps_local/ui/PixelMenu.h"
 #include "components/OptionPopup.h"
 
 class FileBrowserActivity final : public UiListActivity {
@@ -28,7 +29,6 @@ class FileBrowserActivity final : public UiListActivity {
   std::vector<std::string> files;
   std::unique_ptr<char[]> fileNameBuffer;
   OptionPopup optionPopup;
-
   // Pull-based rows: the SDK list resolves each drawn row on demand through
   // provideRow() (fui::ListProps::rowProvider), so the only per-file
   // residency is `files` itself — no full-length rowNames/rowExtensions/
@@ -40,6 +40,10 @@ class FileBrowserActivity final : public UiListActivity {
   static constexpr size_t ROW_NAME_BUF_SIZE = 512;  // NAME_BUFFER_SIZE + "[]" + terminator slack
   char rowNameBuf[ROW_NAME_BUF_SIZE]{};
   char rowExtBuf[16]{};
+  char pathLabel[ROW_NAME_BUF_SIZE]{};
+  bool unicodeNames = false;
+  static constexpr freeink::ui::ActionId ACTION_PAGE = 50;
+  static void pageAction(const freeink::ui::ActionEvent& event, void* context);
   static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
 
   // CJK fallback glyphs are prewarmed for a bounded window of rows around the
@@ -53,10 +57,6 @@ class FileBrowserActivity final : public UiListActivity {
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
   void onRowLongPress(int index) override;
-#if FREEINK_CAP_TOUCH
-  bool canSwipeDelete(int index) const override { return mode == Mode::Books && index >= 0 && index < listCount(); }
-  void swipeDelete(int index) override;
-#endif
   // Long-press BACK goes to root; short Back goes up a directory (home/cancel at
   // root), and Confirm activates on release while a hold opens file actions.
   bool handleCustomInput() override;
@@ -76,5 +76,6 @@ class FileBrowserActivity final : public UiListActivity {
                                Mode mode = Mode::Books);
   void onEnter() override;
   void onExit() override;
+  void loop() override;
   void render(RenderLock&& lock) override;
 };

@@ -7,7 +7,6 @@
 
 class JpegToFramebufferConverter;
 class PngToFramebufferConverter;
-class GifToFramebufferConverter;
 
 class ImageDecoderFactory {
  public:
@@ -18,5 +17,4 @@ class ImageDecoderFactory {
  private:
   static std::unique_ptr<JpegToFramebufferConverter> jpegDecoder;
   static std::unique_ptr<PngToFramebufferConverter> pngDecoder;
-  static std::unique_ptr<GifToFramebufferConverter> gifDecoder;
 };

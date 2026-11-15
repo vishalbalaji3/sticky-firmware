@@ -29,6 +29,8 @@ void ImageBlock::setExtractor(void* ctx, ExtractFn fn) {
   extractFn = fn;
 }
 
+bool ImageBlock::imageExists() const { return Storage.exists(imagePath.c_str()); }
+
 namespace {
 
 std::string getCachePath(const std::string& imagePath) {
@@ -415,7 +417,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   LOG_DBG("IMG", "Decode successful");
 }
 
-bool ImageBlock::serialize(HalFile& file) {
+bool ImageBlock::serialize(Print& file) {
   serialization::writeString(file, imagePath);
   serialization::writeString(file, srcPath);
   serialization::writePod(file, width);

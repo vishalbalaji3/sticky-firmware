@@ -41,9 +41,11 @@ struct PageResult {
 };
 
 struct ClippingResult {
-  enum class Action : uint8_t { Clip, Lookup, Bookmark };
+  enum class Action : uint8_t { Clip, Lookup, Bookmark, Translate };
   Action action = Action::Clip;
   std::string text;
+  std::string sentence;
+  bool sentenceFragment = false;
   uint16_t startPageOffset = 0;
   uint16_t endPageOffset = 0;
   uint16_t startWordIndex = 0;
@@ -51,8 +53,6 @@ struct ClippingResult {
   uint16_t wordCount = 0;
   uint32_t startOffset = UINT32_MAX;
   uint32_t endOffset = UINT32_MAX;
-  // True when the cursor (not the anchor) was on the first word, i.e. the selection was extended leftwards.
-  bool cursorAtStart = false;
 };
 
 struct ProgressChangeResult {

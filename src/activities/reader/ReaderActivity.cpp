@@ -3,6 +3,7 @@
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
+#include <I18n.h>
 #include <KOReaderDocumentId.h>
 #include <Memory.h>
 #include <TrustedTime.h>
@@ -11,6 +12,7 @@
 #include <cctype>
 #include <cstdio>
 
+#include "../../apps_local/reading/ReadingStatsStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "EpubReaderActivity.h"
@@ -18,11 +20,13 @@
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "XtcReaderActivity.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "util/PluginEvents.h"
 
 ReaderActivity::ReaderActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
                                std::string bookPath, const bool allowFastInitialRefresh)
     : Activity(name, renderer, mappedInput), bookPath(std::move(bookPath)) {
+  setInterfaceFontSection(menufont::Section::Reader);
   if (allowFastInitialRefresh) {
     const int refreshFrequency = SETTINGS.getRefreshFrequency();
     pagesUntilFullRefresh = refreshFrequency > 1 ? refreshFrequency : 2;
@@ -51,7 +55,41 @@ void ReaderActivity::disableFastInitialRefresh() { pagesUntilFullRefresh = 0; }
 
 void ReaderActivity::notePageTurn(const bool forward, const bool succeeded) {
   RenderLock lock(*this);
+  if (succeeded) clearContentsReturn();
   readerSession.noteTurn(forward, succeeded);
+}
+void ReaderActivity::rememberContentsPosition(ContentsPosition position) {
+  clearContentsReturn();
+  // A small interaction host lives only until the next turn; no page buffer is retained.
+  auto control = makeUniqueNoThrow<ContentsReturnUi>(renderer);
+  if (!control) {
+    LOG_ERR("READER", "OOM: contents return control");
+    return;
+  }
+  contentsJump.remember(position);
+  contentsReturn = std::move(control);
+  contentsReturnActive.store(true, std::memory_order_release);
+}
+bool ReaderActivity::handleContentsReturn() {
+  if (!contentsReturnActive.load(std::memory_order_acquire)) return false;
+  RenderLock lock(*this);
+  if (!contentsReturn || !contentsReturn->activated(mappedInput)) return false;
+  restoreContentsPosition(contentsJump.origin());
+  clearContentsReturn();
+  requestUpdate();
+  return true;
+}
+void ReaderActivity::clearContentsReturn() {
+  contentsReturnActive.store(false, std::memory_order_release);
+  contentsJump.clear();
+  contentsReturn.reset();
+}
+void ReaderActivity::renderContentsReturn(bool grayMask) {
+  if (!contentsReturn) return;
+  if (contentsJump.rendered(contentsPagePosition()))
+    contentsReturn->render(grayMask);
+  else
+    clearContentsReturn();
 }
 
 void ReaderActivity::onEnter() {
@@ -80,6 +118,11 @@ void ReaderActivity::onEnter() {
     if (!handleLoadFailure()) finish();
     return;
   }
+  const auto document = KOReaderDocumentId::calculate(bookPath);
+  bool completed = false, manuallyUnfinished = false;
+  if (readingstats::validDocument(document.c_str()) &&
+      readingstats::completionStatus(document.c_str(), completed, manuallyUnfinished))
+    bookFinished.store(completed, std::memory_order_release);
 
   requestUpdate();
 }
@@ -109,13 +152,10 @@ void ReaderActivity::onExit() {
   flushReaderSession();
 
   if (pluginevents::anySubscriber(pluginevents::Event::ReaderExit)) {
-    const ScreenshotInfo info = getScreenshotInfo();
     char percent[8];
-    char endPercent[8];
-    snprintf(percent, sizeof(percent), "%d", info.progressPercent);
-    snprintf(endPercent, sizeof(endPercent), "%d", info.endProgressPercent);
-    const pluginevents::Var vars[] = {{"book", bookPath.c_str()}, {"percent", percent}, {"end_percent", endPercent}};
-    pluginevents::emit(pluginevents::Event::ReaderExit, vars, 3);
+    snprintf(percent, sizeof(percent), "%d", getScreenshotInfo().progressPercent);
+    const pluginevents::Var vars[] = {{"book", bookPath.c_str()}, {"percent", percent}};
+    pluginevents::emit(pluginevents::Event::ReaderExit, vars, 2);
   }
 
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -128,10 +168,10 @@ void ReaderActivity::onExit() {
 
 void ReaderActivity::prepareForSleep() { flushReaderSession(); }
 
-void ReaderActivity::flushReaderSession() {
-  if (!readerSession.isEmitWorthy() || !pluginevents::anySubscriber(pluginevents::Event::ReaderSession)) {
+bool ReaderActivity::flushReaderSession() {
+  if (!readerSession.isEmitWorthy()) {
     readerSession.reset();
-    return;
+    return true;
   }
 
   const std::string document = KOReaderDocumentId::calculate(bookPath);
@@ -139,7 +179,19 @@ void ReaderActivity::flushReaderSession() {
       document.size() == 32 && std::all_of(document.begin(), document.end(), [](const unsigned char c) {
         return std::isdigit(c) || (c >= 'a' && c <= 'f');
       });
+  bool saved = true;
   if (validDocument) {
+    if (readingstats::enabledFormat(bookPath.c_str(), SETTINGS.readingFormats)) {
+      bool completed = isBookFinished();
+      saved = readingstats::recordSession(document.c_str(), getBookTitle().c_str(), getBookAuthor().c_str(),
+                                          readerSession.startTime(), readerSession.durationSeconds(),
+                                          readerSession.pagesRead(), readerSession.endProgressBp(), &completed);
+      if (saved) bookFinished.store(completed, std::memory_order_release);
+    }
+    if (!pluginevents::anySubscriber(pluginevents::Event::ReaderSession)) {
+      readerSession.reset();
+      return saved;
+    }
     char startTime[24];
     char endTime[24];
     char duration[16];
@@ -156,7 +208,87 @@ void ReaderActivity::flushReaderSession() {
                                       {"end_progress_bp", endProgress}, {"progress_scale", "10000"}};
     pluginevents::emit(pluginevents::Event::ReaderSession, vars, 8);
   }
+  // Verification can fail after a complete append. Never replay this
+  // best-effort session on another flush and count the same reading twice.
   readerSession.reset();
+  return validDocument && saved;
+}
+
+void ReaderActivity::showFinishBookError(const char* message) {
+  auto dialog =
+      makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_READER_FINISH_BOOK), message, true);
+  if (!dialog) {
+    LOG_ERR("READER", "OOM: completion error dialog");
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(std::move(dialog), [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void ReaderActivity::requestFinishBook() {
+  // The activity stack owns the modal; cancel leaves the reading position untouched.
+  const bool reopen = isBookFinished() && !finishedPositionPending;
+  auto dialog = makeUniqueNoThrow<ConfirmationActivity>(
+      renderer, mappedInput, reopen ? tr(STR_READER_MARK_UNFINISHED) : tr(STR_READER_FINISH_BOOK),
+      reopen ? tr(STR_READER_UNFINISH_CONFIRM) : tr(STR_READER_FINISH_CONFIRM));
+  if (!dialog) {
+    LOG_ERR("READER", "OOM: finish-book confirmation");
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(std::move(dialog), [this, reopen](const ActivityResult& result) {
+    if (result.isCancelled) {
+      requestUpdate();
+      return;
+    }
+    const char* error = nullptr;
+    {
+      RenderLock lock(*this);
+      const auto now = trustedtime::trustedNow();
+      const auto document = KOReaderDocumentId::calculate(bookPath);
+      if (!now)
+        error = tr(STR_READER_FINISH_CLOCK);
+      else if (!readingstats::validDocument(document.c_str()) || !flushReaderSession())
+        error = tr(STR_READER_FINISH_FAILED);
+      else {
+        const bool saved = reopen ? readingstats::recordReopening(
+                                        document.c_str(), getBookTitle().c_str(), getBookAuthor().c_str(), now,
+                                        static_cast<uint16_t>(std::clamp(getProgressBasisPoints(), 0, 9999)))
+                                  : readingstats::recordCompletion(document.c_str(), getBookTitle().c_str(),
+                                                                   getBookAuthor().c_str(), now);
+        if (!saved)
+          error = tr(STR_READER_FINISH_FAILED);
+        else {
+          bookFinished.store(!reopen, std::memory_order_release);
+          finishedPositionPending = !reopen && !saveFinishedPosition();
+          if (finishedPositionPending) error = tr(STR_READER_FINISH_POSITION_FAILED);
+        }
+      }
+    }
+    if (error)
+      showFinishBookError(error);
+    else
+      requestUpdate();
+  });
+}
+
+void ReaderActivity::recordEndOfBook() {
+  if (!endRenderedPending.exchange(false, std::memory_order_acquire)) return;
+  RenderLock lock(*this);
+  if (!readingstats::enabledFormat(bookPath.c_str(), SETTINGS.readingFormats)) return;
+  if (!isAtEndOfBook()) {
+    endCompletionAttempted = false;
+    return;
+  }
+  if (endCompletionAttempted || isBookFinished()) return;
+  endCompletionAttempted = true;
+  const auto now = trustedtime::trustedNow();
+  const auto document = KOReaderDocumentId::calculate(bookPath);
+  if (now && readingstats::validDocument(document.c_str()) && flushReaderSession() &&
+      readingstats::recordCompletion(document.c_str(), getBookTitle().c_str(), getBookAuthor().c_str(), now))
+    bookFinished.store(true, std::memory_order_release);
+  else
+    LOG_ERR("READER", "Could not record end-of-book completion");
 }
 
 bool ReaderActivity::handleBackNavigation() {
@@ -168,6 +300,7 @@ void ReaderActivity::clearEndOfBookOptionsIfNeeded() {
   if (isAtEndOfBook() || !endOfBookOptionsReady.load(std::memory_order_acquire)) return;
 
   RenderLock lock(*this);
+  endCompletionAttempted = false;
   endOfBookOptionsReady.store(false, std::memory_order_release);
   endOfBookOptions.reset();
 }
@@ -181,11 +314,7 @@ bool ReaderActivity::handleEndOfBookMenu(const bool suppressConfirmRelease) {
     return false;
   }
 
-  std::string openPath;
-  switch (endOfBookOptions->handleMenuInput(mappedInput, &openPath)) {
-    case EndOfBookOptions::Action::OpenBook:
-      activityManager.goToReader(openPath);
-      return true;
+  switch (endOfBookOptions->handleMenuInput(mappedInput)) {
     case EndOfBookOptions::Action::GoHome:
       onGoHome();
       return true;
@@ -220,12 +349,15 @@ bool ReaderActivity::handleEndOfBookPageTurn(const bool prevTriggered, const boo
 
 void ReaderActivity::loop() {
   rememberBookOnceRendered();
+  if (pageRendered.load(std::memory_order_acquire)) recordEndOfBook();
   clearEndOfBookOptionsIfNeeded();
   if (handleEndOfBookMenu()) return;
   if (handleFormatInput()) return;
+  if (handleContentsReturn()) return;
   if (handleBackNavigation()) return;
 
-  const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+  const auto touch = ReaderUtils::detectTouchPageTurn(
+      renderer, mappedInput, false, SETTINGS.xtcInvertPageDirection && FsHelpers::hasXtcExtension(bookPath));
   auto [prevTriggered, nextTriggered, fromTilt] = ReaderUtils::detectPageTurn(mappedInput);
   prevTriggered = prevTriggered || touch.prev;
   nextTriggered = nextTriggered || touch.next;
@@ -251,16 +383,17 @@ void ReaderActivity::render(RenderLock&&) {
     }
     renderer.clearScreen();
     if (endOfBookOptions) {
-      endOfBookOptions->loadOnce(bookPath);
+      endOfBookOptions->loadOnce();
       // Release-publish AFTER loadOnce() so the main task's acquire load can't
-      // observe an object whose names/selector are still being populated.
+      // observe an object whose screen and input handlers are still being set up.
       endOfBookOptionsReady.store(true, std::memory_order_release);
-      endOfBookOptions->render(renderer, mappedInput);
+      endOfBookOptions->render();
     }
     renderer.displayBuffer();
     onEndOfBookRendered();
     markPageRendered();
     readerSession.onRenderComplete(millis(), trustedtime::trustedNow(), getProgressBasisPoints());
+    endRenderedPending.store(true, std::memory_order_release);
     return;
   }
 

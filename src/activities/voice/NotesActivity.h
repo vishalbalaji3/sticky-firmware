@@ -8,9 +8,9 @@
 #include "voice/VoiceFormat.h"
 
 // Recent voice notes with their transcripts. Opening it syncs over the saved network.
-class NotesActivity final : public UiListActivity {
+class VoiceNotesActivity final : public UiListActivity {
  public:
-  NotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+  VoiceNotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
       : UiListActivity("Notes", renderer, mappedInput) {}
   void onEnter() override;
   void onExit() override;

@@ -1,3 +1,4 @@
+#include <Bitmap.h>
 #include <BmpToBmpConverter.h>
 #include <HalStorage.h>
 #include <Print.h>
@@ -130,3 +131,28 @@ TEST_F(BmpToBmpTest, OneBitSourceStaysOneBit) {
 }
 
 }  // namespace
+
+TEST_F(BmpToBmpTest, RandomGrayRowInvalidatesSequentialReadAhead) {
+  const auto bytes = splitBmp(4, 4, true, false);
+  {
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  }
+  ASSERT_TRUE(file.open(path.c_str(), "rb"));
+  Bitmap bitmap(file);
+  ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
+  uint8_t ahead[48] = {};
+  uint8_t raw[12] = {};
+  uint8_t packed[1] = {};
+  uint8_t gray[4] = {};
+  bitmap.setReadAheadBuffer(ahead, sizeof(ahead));
+  ASSERT_EQ(bitmap.readNextRow(packed, raw), BmpReaderError::Ok);
+  EXPECT_EQ(packed[0], 0);
+  ASSERT_EQ(bitmap.readRowGray(2, gray, raw), BmpReaderError::Ok);
+  EXPECT_EQ(gray[0], 255);
+  ASSERT_EQ(bitmap.readNextRow(packed, raw), BmpReaderError::Ok);
+  EXPECT_EQ(packed[0], 255);
+  EXPECT_EQ(bitmap.readNextRow(packed, raw), BmpReaderError::ShortReadRow);
+  EXPECT_EQ(bitmap.readRowGray(-1, gray, raw), BmpReaderError::BadDimensions);
+  EXPECT_EQ(bitmap.readRowGray(4, gray, raw), BmpReaderError::BadDimensions);
+}

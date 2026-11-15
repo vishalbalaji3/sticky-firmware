@@ -33,7 +33,9 @@ uint16_t enabled() {
   // Drop bits naming no layout: the mask comes from a hand-editable file and
   // survives downgrades, so it can carry bits this build does not have. Left
   // in, such a mask would read as "configured" while enabling nothing.
-  const uint16_t configured = static_cast<uint16_t>(SETTINGS.keyboardLayouts & ALL_BITS);
+  uint16_t configured = static_cast<uint16_t>(SETTINGS.keyboardLayouts & ALL_BITS);
+  if (configured && (I18N.getLanguage() == Language::EN || I18N.getLanguage() == Language::ES))
+    configured |= layoutBit(forLanguage(I18N.getLanguage()));
   if (configured != 0) {
     if (configured & LATIN_BITS) return configured;
     return static_cast<uint16_t>(configured | layoutBit(freeink::ui::KeyboardLayoutId::QwertyEn));

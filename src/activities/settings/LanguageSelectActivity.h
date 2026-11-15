@@ -23,7 +23,9 @@ class LanguageSelectActivity final : public UiListActivity {
   const char* headerTitle() const override;
 
   // Only the languages compiled into this build (custom_i18n_builtin_langs), not the whole enum.
-  constexpr static uint8_t totalItems = sizeof(SORTED_LANGUAGE_INDICES) / sizeof(SORTED_LANGUAGE_INDICES[0]);
+  static constexpr uint8_t availableLanguages[] = {static_cast<uint8_t>(Language::EN),
+                                                   static_cast<uint8_t>(Language::ES)};
+  static constexpr uint8_t totalItems = 2;
 
   // Row storage: totalItems is a compile-time constant, so a fixed-capacity
   // array avoids any heap allocation for the row list. Built once in

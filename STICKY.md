@@ -1,5 +1,9 @@
 # reTerminal Sticky: hardware notes
 
+This firmware ports CrossNext 1.4.0 with the Sticky custom services. See
+[port scope and decisions](docs/research/crossnext-full-port.md). AI Notes and Japanese
+are in Apps and can be pinned to Home. Upstream OTA is disabled for this hardware build.
+
 The Sticky build of this fork (`pio run -e sticky`, macro `FREEINK_DEVICE_STICKY`). Product spec, open
 issues and the device test checklist live in the cloud repo, `vishalbalaji3/sticky-cloud`
 (`SPEC.md`, `ISSUES.md`, `TESTING.md`). Read this before touching boot, power, serial, I2C or the mic.
@@ -14,7 +18,7 @@ git checkout sticky-os && git submodule update --init   # SDK is our fork: visha
 ```
 
 - In the SDK submodule, `origin` is upstream Free-Ink (read only). Push to the `mine` remote.
-- A fresh flash boots, then goes straight back to sleep, because the power-button wake check fails. Click the third button to wake it.
+- USB-powered resets and fresh flashes stay awake on Sticky. A normal button wake consumes its initial release.
 - Host tests: `cmake -S test -B build/test && cmake --build build/test -j8 && ctest --test-dir build/test -j8`. `ParserStopTest` is flaky under `-j8` only.
 
 ## Gotchas
@@ -34,7 +38,7 @@ git checkout sticky-os && git submodule update --init   # SDK is our fork: visha
   - Requests use HTTP/1.0 to avoid chunked bodies.
 - **SD and the e-paper share one SPI bus (SCK13/MOSI14).** Voice capture goes through a PSRAM ring on core 0, so display refreshes don't drop samples. 0 dropped has been verified.
 - **Buttons: Up GPIO5, Down GPIO6, third button GPIO4 (power, AI and confirm in one).**
-  - A click is Back (one level up; injected as a Back click in `main.cpp`), and wakes from sleep. Holding records. Up+Down locks.
+  - A click is Confirm/Menu (injected in `main.cpp`), and wakes from sleep. Holding records. Up+Down locks. Use touch Back to return; the wake click and recording release do not activate a menu. CrossNext uses its native list reader menu on Sticky so physical navigation stays available.
   - `shortPwrBtn` is forced to IGNORE on the Sticky, so the stock ghost-wake hold check is skipped there.
 - **Deep-sleep wake is a full reboot.** Anything that must react to a held button (hold-to-record from sleep) has to act early in `setup()`.
 - **Battery gauge BQ27220 0x55 on Wire1 (SDA1/SCL0), shared with PCF8563 RTC 0x51, SHT40 0x44, LSM6DS3 0x6A.** Touch (GT911) is on its own bus (SDA3/SCL2).
@@ -72,10 +76,14 @@ Keep these exceptions in these files. Other new screens still use FreeInkUI.
   Holding the third button from sleep starts capture early; the recording dot is part of the first paint.
 - On picture pages, taps keep the normal page-turn and menu zones. Hold a picture to open
   the viewer. Tap to zoom 1x → 2x → 3x → 1x around the tapped point, drag to pan, or use
-  Up/Down to zoom. The X returns to the same page; the third button goes back or records.
-- Reading sync tries saved networks in range, strongest first. Before an exit push it checks
-  remote progress and preserves any further position, because client IDs are shared across units.
-  Failed reads skip the push. Use manual sync to deliberately replace a further remote position.
+  Up/Down to zoom. The X returns to the same page; the third button records on hold.
+- Reading sync tries saved networks in range, strongest first. With the custom server, it keeps a per-book sync revision and an unsent-change flag on the SD card.
+  A new remote position is applied even when it moves backward. Local changes upload only against an
+  unchanged server revision; edits still unsent on Sticky plus a changed remote revision show the existing Remote/Local
+  choice instead of guessing. Opening a book always checks again (except the immediate return from
+  sync); there is no two-minute cooldown. Old books or a changed account need one explicit choice to
+  establish the baseline. Failed reads/uploads preserve unsent local changes. The hosted CrossPoint
+  server's forward-only KOSync behavior is not compatible with automatic rewinds.
 - Sticky downloads batch SD writes and use larger network buffers in PSRAM. The log reports
   bytes per second; speed improvements still require measurement on hardware.
 
@@ -83,3 +91,21 @@ The combined build needs owner checks for these behaviors, including picture con
 four orientations and recording after leaving Notes. A passing build is not a device test.
 
 Japanese cards use the selected reader font, targeting 18 pt for questions and answers; progress and rating controls keep their smaller UI fonts.
+
+### Latest-position sync verification (pending device checks)
+
+The custom backend must support `revision` and conditional `expected_revision` before automatic
+reconciliation can establish a baseline. Readest uses normal KOSync; no special client changes are
+needed. `sync-state.bin` is a 40-byte checksummed companion to `progress.bin`, associated with its
+exact bytes and the server/account/document. A missing or mismatched record requires an explicit
+position choice. Cache clears from the reader preserve this state; externally deleting the cache
+removes it. This does not change Hardcover's completed-book protection.
+
+After backing up the SD card and installing the matching backend/firmware, choose the initial
+position for Strange Pictures. Check Readest 72% → 2% → Sticky, then a backward jump on Sticky →
+Readest. Reopen immediately to check there is no cooldown. Read on both devices offline: after
+reconnection, test both device orders and their conflict choices. Readest sends unconditional writes;
+Readest 0.12.20 Ask on conflict can still upload while a prompt is unresolved, including on background.
+The owner accepted this gap: protection covers edits still unsent on Sticky, not both upload orders. Repeat
+following sleep/reboot and a font/orientation change; layout changes alone must not create an edit.
+Observe Hardcover status/read count before and after. Host checks do not verify these device steps.

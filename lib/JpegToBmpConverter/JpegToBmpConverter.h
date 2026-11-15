@@ -7,9 +7,12 @@ class ZipFile;
 
 class JpegToBmpConverter {
   static bool jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& bmpOut, int targetWidth, int targetHeight,
-                                          bool oneBit, bool crop = true, bool originalThresholds = false);
+                                          bool oneBit, bool crop = true, bool originalThresholds = false,
+                                          bool gray8 = false);
 
  public:
+  static bool jpegFileToGrayBmpStreamNative(HalFile& file, Print& out);
+  static bool jpegFileTo1BitBmpStreamFitWithin(HalFile& jpegFile, Print& bmpOut, int maxWidth, int maxHeight);
   static bool jpegFileToBmpStream(HalFile& jpegFile, Print& bmpOut, bool crop = true, bool originalThresholds = false);
   // Convert with custom target size (for thumbnails)
   static bool jpegFileToBmpStreamWithSize(HalFile& jpegFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight);

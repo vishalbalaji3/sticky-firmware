@@ -6,6 +6,7 @@
 #include "CrossPointSettings.h"
 #include "I18nKeys.h"
 #include "MappedInputManager.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -56,17 +57,19 @@ void KeyboardLayoutsActivity::activateIndex(const int index) {
 }
 
 void KeyboardLayoutsActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  // Content: the safe area minus the header band GUI.drawHeader paints.
+  pixelui::begin(screen, mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
 
   for (int i = 0; i < keyboard_layouts::COUNT; ++i) {
     const uint8_t row = static_cast<uint8_t>(i);
+    rowItems[i].subtitle = nullptr;
     GUI.setCheckboxRow(rowItems[i], (workingMask & keyboard_layouts::bitAt(row)) != 0);
     if (isLocked(row)) {
       rowItems[i].toggle = false;
-      rowItems[i].value = tr(STR_DEFAULT_VALUE);
+      rowItems[i].subtitle = tr(STR_DEFAULT_VALUE);
     }
   }
 
@@ -76,5 +79,5 @@ void KeyboardLayoutsActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }

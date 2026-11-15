@@ -12,23 +12,28 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "TimezonePickerActivity.h"
+#include "apps_local/tools/ManualClockActivity.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
+#include "util/DateFormat.h"
 #include "util/Timezones.h"
 
 namespace fui = freeink::ui;
 
 namespace {
 enum MenuItem {
-  ITEM_TIMEZONE = 0,
+  ITEM_MANUAL = 0,
+  ITEM_TIMEZONE,
   ITEM_DST,
   ITEM_FORMAT,
+  ITEM_DATE_FORMAT,
   ITEM_SHOW_ON_HOME,
   ITEM_SYNC,
 };
 
 const StrId menuNames[ClockSettingsActivity::ITEM_COUNT] = {
-    StrId::STR_TIMEZONE,        StrId::STR_CLOCK_DST,      StrId::STR_CLOCK_FORMAT,
-    StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_CLOCK_MANUAL, StrId::STR_TIMEZONE,        StrId::STR_CLOCK_DST,      StrId::STR_CLOCK_FORMAT,
+    StrId::STR_DATE_FORMAT,  StrId::STR_CLOCK_IN_HEADER, StrId::STR_CLOCK_SYNC_NOW,
 };
 
 const StrId dstNames[CrossPointSettings::CLOCK_DST_MODE_COUNT] = {StrId::STR_CLOCK_DST_AUTO, StrId::STR_STATE_ON,
@@ -36,7 +41,7 @@ const StrId dstNames[CrossPointSettings::CLOCK_DST_MODE_COUNT] = {StrId::STR_CLO
 }  // namespace
 
 ClockSettingsActivity::ClockSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : UiListActivity("ClockSettings", renderer, mappedInput) {}
+    : UiListActivity("ClockSettings", renderer, mappedInput, false, true) {}
 
 void ClockSettingsActivity::onEnter() {
   UiListActivity::onEnter();
@@ -52,6 +57,12 @@ void ClockSettingsActivity::activateIndex(const int index) {
   nav.selected = index;
   app.clearTapFlash();
   switch (index) {
+    case ITEM_MANUAL:
+      if (auto activity = makeUniqueNoThrow<ManualClockActivity>(renderer, mappedInput))
+        startActivityForResult(std::move(activity), nullptr);
+      else
+        LOG_ERR("CLKSET", "OOM: ManualClockActivity");
+      return;
     case ITEM_TIMEZONE:
       if (auto activity = makeUniqueNoThrow<TimezonePickerActivity>(renderer, mappedInput)) {
         startActivityForResult(std::move(activity), nullptr);
@@ -65,6 +76,9 @@ void ClockSettingsActivity::activateIndex(const int index) {
       break;
     case ITEM_FORMAT:
       SETTINGS.clockFormat = (SETTINGS.clockFormat + 1) % 2;
+      break;
+    case ITEM_DATE_FORMAT:
+      SETTINGS.dateFormat = (SETTINGS.dateFormat + 1) % dateformat::COUNT;
       break;
     case ITEM_SHOW_ON_HOME:
       SETTINGS.clockShowInHeader = (SETTINGS.clockShowInHeader + 1) % 2;
@@ -84,21 +98,22 @@ void ClockSettingsActivity::activateIndex(const int index) {
 }
 
 void ClockSettingsActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  pixelui::begin(screen, mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
 
   // Every value is a flash/translation string or the member time buffer, so
   // the render pass allocates nothing.
-  rowItems_[ITEM_TIMEZONE].value = timezones::table()[timezones::activeIndex()].name;
+  rowItems_[ITEM_TIMEZONE].subtitle = timezones::table()[timezones::activeIndex()].name;
   const uint8_t dst = SETTINGS.clockDst < CrossPointSettings::CLOCK_DST_MODE_COUNT ? SETTINGS.clockDst : uint8_t{0};
-  rowItems_[ITEM_DST].value = I18N.get(dstNames[dst]);
-  rowItems_[ITEM_FORMAT].value = SETTINGS.clockFormat == 1 ? tr(STR_CLOCK_FORMAT_12H) : tr(STR_CLOCK_FORMAT_24H);
+  rowItems_[ITEM_DST].subtitle = I18N.get(dstNames[dst]);
+  rowItems_[ITEM_FORMAT].subtitle = SETTINGS.clockFormat == 1 ? tr(STR_CLOCK_FORMAT_12H) : tr(STR_CLOCK_FORMAT_24H);
+  rowItems_[ITEM_DATE_FORMAT].subtitle = dateformat::label(dateformat::fromStored(SETTINGS.dateFormat));
   GUI.setCheckboxRow(rowItems_[ITEM_SHOW_ON_HOME], SETTINGS.clockShowInHeader);
   // The sync row's value is the current time itself: it confirms the sync,
   // previews format/zone changes, and reads "Not Set" until the first sync.
-  rowItems_[ITEM_SYNC].value =
+  rowItems_[ITEM_SYNC].subtitle =
       SETTINGS.clockHasBeenSynced && halClock.formatTime(syncTime_, sizeof(syncTime_), SETTINGS.clockFormat == 1)
           ? syncTime_
           : tr(STR_NOT_SET);
@@ -112,5 +127,5 @@ void ClockSettingsActivity::buildScreen(UiScreen& screen) {
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }

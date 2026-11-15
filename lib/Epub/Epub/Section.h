@@ -1,5 +1,4 @@
 #pragma once
-#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -7,12 +6,14 @@
 #include <vector>
 
 #include "Epub.h"
+#include "PageCacheWriter.h"
 #include "ReaderRenderSpec.h"
 
 class Page;
 class GfxRenderer;
 class ChapterHtmlSlimParser;
 class CssParser;
+class PageReadBudget;
 
 class Section {
   std::shared_ptr<Epub> epub;
@@ -22,6 +23,9 @@ class Section {
   HalFile file;
 
   void writeSectionFileHeader(const ReaderRenderSpec& spec);
+  // The spec a build and its cache really use: a standalone document forces
+  // images off.
+  ReaderRenderSpec effectiveSpec(const ReaderRenderSpec& requested) const;
   uint32_t onPageComplete(std::unique_ptr<Page> page);
 
   // Page-offset table entry, kept in RAM while an incremental build is running so
@@ -34,12 +38,14 @@ class Section {
   };
   // Held only while an incremental build is in progress (see startBuild). Carries the
   // live parser plus the strings it references (the parser stores them by reference)
-  // and the in-RAM page-offset table. The table is a deque so it grows in small chunks: a vector
-  // doubling past 1024 pages needs 24 KB contiguous, and a failed allocation aborts. The deque
-  // (like the parser's anchor list) takes one ~0.5 KB node as soon as the build starts.
+  // and the in-RAM page-offset table.
   struct BuildContext {
+    explicit BuildContext(HalFile& file);
+    PageCacheWriter writer;
+    bool cacheWriteFailed = false;
+    ReaderRenderSpec spec;
     std::unique_ptr<ChapterHtmlSlimParser> parser;
-    std::deque<PageLutEntry> lut;
+    std::vector<PageLutEntry> lut;
     std::string parsePath;
     std::string contentBase;
     std::string imageBasePath;
@@ -57,6 +63,12 @@ class Section {
     uint32_t smoothedAtConsumed = 0;
   };
   std::unique_ptr<BuildContext> build_;
+  // Set by the standalone constructor: a document that is already an HTML file
+  // on the card, with no Epub behind it. Empty when built from an Epub.
+  std::string standaloneHtmlPath_;
+  std::string standaloneCacheDir_;
+  std::vector<std::string> standaloneAnchors_;
+  bool captureFootnotes_ = true;
   bool buildComplete_ = false;
   // Pages laid out by the active build (== build_->lut.size()). Distinct from pageCount,
   // which is the pages *available to read* and also counts a loaded partial file's pages.
@@ -68,6 +80,7 @@ class Section {
   // Parse watermark from the partial's trailer, for estimating the total page count.
   uint32_t partialBytesConsumed_ = 0;
   uint32_t partialTotalBytes_ = 0;
+  bool startBuildImpl(const ReaderRenderSpec& spec, const std::function<void()>& popupFn, bool allowCacheReplay);
   bool finalizeBuild();
   // Write the LUTs/anchor map (and, for a partial, the watermark trailer), patch the
   // header, stamp the version byte, and swap the tmp .bin over filePath.
@@ -75,11 +88,10 @@ class Section {
   // Builds write here and are swapped over filePath only on commit, so a prior
   // partial/finalized file stays readable while a rebuild is in progress.
   std::string binTmpPath() const { return filePath + ".part"; }
-  std::unique_ptr<Page> loadPageAt(int page) const;
+  std::unique_ptr<Page> loadPageAt(int page, PageReadBudget* budget = nullptr) const;
   // Read a page already laid out by the in-progress build (page < build LUT size), from
   // the partially-written tmp .bin without disturbing the build's write cursor.
   std::unique_ptr<Page> loadPageDuringBuild(int page);
-  bool openAnchorMap(HalFile& anchorFile, uint16_t& count) const;
 
  public:
   uint16_t pageCount = 0;
@@ -88,6 +100,13 @@ class Section {
   // Constructor and destructor are out-of-line: BuildContext holds a unique_ptr to the
   // forward-declared ChapterHtmlSlimParser, whose full definition is only visible in the .cpp.
   explicit Section(const std::shared_ptr<Epub>& epub, int spineIndex, GfxRenderer& renderer);
+  // A standalone document: htmlPath is an existing XHTML file, cacheDir receives
+  // sections/<index>.bin, and every id in sectionAnchors starts a fresh page.
+  // No zip, no CSS, no images (the section forces that in the spec it uses),
+  // and no footnote entries unless captureFootnotes. The Wikipedia app lays out an
+  // article this way; nothing else about the section changes.
+  Section(std::string htmlPath, std::string cacheDir, int index, GfxRenderer& renderer,
+          std::vector<std::string> sectionAnchors, bool captureFootnotes);
   ~Section();
   bool loadSectionFile(const ReaderRenderSpec& spec);
   bool clearCache() const;
@@ -101,10 +120,7 @@ class Section {
   bool startBuild(const ReaderRenderSpec& spec, const std::function<void()>& popupFn = nullptr);
   // Lay out up to maxPages more pages (maxPages <= 0 = build to completion). Returns
   // false on error (the build is abandoned). Sets isBuildComplete() when finished.
-  // yieldNow, when given, is asked after every parse step (1 KB of HTML, whose callbacks may
-  // lay out and write several pages); true ends the call early so the caller can serve input.
-  // The next call resumes where this one left off.
-  bool buildSomeMore(int maxPages, bool (*yieldNow)() = nullptr);
+  bool buildSomeMore(int maxPages);
   bool isBuilding() const { return static_cast<bool>(build_); }
   bool isBuildComplete() const { return buildComplete_; }
   // Best-known total page count: the exact pageCount once finalized, or a smoothed byte-based
@@ -124,14 +140,14 @@ class Section {
   // Unified page read: from the active build if it has reached the page, otherwise from
   // the on-disk file (finalized section, or a partial the rebuild hasn't caught up to).
   std::unique_ptr<Page> loadPage(int page);
+  // Finalized text pages only; a failed speculative load never changes the cache.
+  std::unique_ptr<Page> loadPageForPrefetch(int page, size_t memoryBudget) const;
 
   std::string getTextFromSectionFile();
 
   // Resolve an anchor from the in-progress build first, then the on-disk anchor map
   // (covers finalized sections and partials from a previous session).
   std::optional<uint16_t> findAnchor(const std::string& anchor) const;
-  // Select a TOC boundary without reopening the anchor map for every story.
-  int getTocIndexForPage(int page) const;
 
   // True if this spine's unzipped HTML is already cached, so a build won't pay the (multi-second on a
   // giant spine) zip inflation. Lets the reader skip the indexing popup on a fast reopen/rebuild.

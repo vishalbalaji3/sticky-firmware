@@ -4,7 +4,6 @@
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <HalFrontlight.h>
-#include <HalStorage.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <esp_mac.h>
@@ -12,7 +11,7 @@
 #include <cstdio>
 
 #include "MappedInputManager.h"
-#include "activities/RenderLock.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -23,9 +22,6 @@ enum MenuItem {
   ITEM_FIRMWARE,
   ITEM_CHIP,
   ITEM_FLASH,
-  ITEM_SD_SIZE,
-  ITEM_SD_USED,
-  ITEM_SD_FREE,
   ITEM_DISPLAY,
   ITEM_RESOLUTION,
   ITEM_TOUCH,
@@ -39,35 +35,9 @@ enum MenuItem {
 // these screenshots across every device language, so the labels must be
 // identical on every unit.
 const char* const menuNames[AboutActivity::ITEM_COUNT] = {
-    "Device",
-    "Firmware",
-    "Chip",
-    "Flash",
-    "SD Size",
-    "SD Used",
-    "SD Free",
-    "Display Controller",
-    "Resolution",
-    "Touch",
-    "Frontlight",
-    "RTC",
-    "Tilt Sensor (IMU)",
-    "MAC Address",
+    "Device", "Firmware",          "Chip",        "Flash", "Display Controller", "Resolution", "Touch", "Frontlight",
+    "RTC",    "Tilt Sensor (IMU)", "MAC Address",
 };
-
-// "14.5 GB" / "35 MB": GiB with one decimal, MiB below 1 GiB.
-std::string formatBytes(const uint64_t bytes) {
-  char buf[24];
-  constexpr uint64_t MIB = 1024ull * 1024ull;
-  constexpr uint64_t GIB = 1024ull * MIB;
-  if (bytes >= GIB) {
-    const uint64_t tenths = (bytes * 10 + GIB / 2) / GIB;
-    snprintf(buf, sizeof(buf), "%u.%u GB", static_cast<unsigned>(tenths / 10), static_cast<unsigned>(tenths % 10));
-  } else {
-    snprintf(buf, sizeof(buf), "%u MB", static_cast<unsigned>((bytes + MIB / 2) / MIB));
-  }
-  return buf;
-}
 
 // Chip part numbers, not user prose — deliberately untranslated.
 const char* displayControllerName(const BoardConfig::DisplayController c) {
@@ -112,7 +82,7 @@ const char* touchControllerName(const BoardConfig::TouchController c) {
 }  // namespace
 
 AboutActivity::AboutActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : UiListActivity("About", renderer, mappedInput) {}
+    : UiListActivity("About", renderer, mappedInput, false, true) {}
 
 const char* AboutActivity::headerTitle() const { return "About"; }
 
@@ -129,16 +99,13 @@ void AboutActivity::onEnter() {
   // profile and applyXteinkDisplayController() may have promoted the display
   // controller to the panel actually found on the bus.
   rowValues_[ITEM_DEVICE] = BoardConfig::ACTIVE.name;
-  rowValues_[ITEM_FIRMWARE] = CROSSPOINT_VERSION;
+  rowValues_[ITEM_FIRMWARE] = tr(STR_CROSSNEXT);
+  rowValues_[ITEM_FIRMWARE] += " " CROSSPOINT_VERSION;
   snprintf(buf, sizeof(buf), "%s rev %u", ESP.getChipModel(), static_cast<unsigned>(ESP.getChipRevision()));
   rowValues_[ITEM_CHIP] = buf;
   snprintf(buf, sizeof(buf), "%u MB", static_cast<unsigned>(ESP.getFlashChipSize() / (1024u * 1024u)));
   rowValues_[ITEM_FLASH] = buf;
-  // The profile names a boot default; boards that probe their panel (Picco,
-  // Sticky) can run another driver, and the driver knows which.
-  const char* liveController = display.controllerName();
-  rowValues_[ITEM_DISPLAY] =
-      liveController ? liveController : displayControllerName(BoardConfig::ACTIVE.displayController);
+  rowValues_[ITEM_DISPLAY] = displayControllerName(BoardConfig::ACTIVE.displayController);
   snprintf(buf, sizeof(buf), "%ux%u", static_cast<unsigned>(BoardConfig::ACTIVE.displayWidth),
            static_cast<unsigned>(BoardConfig::ACTIVE.displayHeight));
   rowValues_[ITEM_RESOLUTION] = buf;
@@ -151,33 +118,16 @@ void AboutActivity::onEnter() {
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   rowValues_[ITEM_MAC] = buf;
-
-  // The used-space scan walks the whole FAT (seconds on a large card): answer the press with "Loading" first.
-  // onEnter runs without the render lock; take it for the popup.
-  {
-    RenderLock lock;
-    GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  }
-  // The firmware does not boot without a card, so About always has one.
-  const uint64_t sdTotal = Storage.sdTotalBytes();
-  rowValues_[ITEM_SD_SIZE] = formatBytes(sdTotal);
-  uint64_t sdUsed = 0;
-  if (Storage.sdUsedBytes(sdUsed)) {
-    rowValues_[ITEM_SD_USED] = formatBytes(sdUsed);
-    rowValues_[ITEM_SD_FREE] = formatBytes(sdUsed <= sdTotal ? sdTotal - sdUsed : 0);
-  } else {
-    rowValues_[ITEM_SD_USED] = rowValues_[ITEM_SD_FREE] = "Error.";
-  }
 }
 
 void AboutActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  pixelui::begin(screen, mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
 
   for (int i = 0; i < ITEM_COUNT; i++) {
-    rowItems_[i].value = rowValues_[i].c_str();
+    rowItems_[i].subtitle = rowValues_[i].c_str();
   }
 
   fui::ListProps props;
@@ -189,5 +139,5 @@ void AboutActivity::buildScreen(UiScreen& screen) {
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 1;
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }

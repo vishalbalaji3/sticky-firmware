@@ -7,7 +7,15 @@
 class FontDecompressor {
  public:
   static constexpr uint16_t MAX_PAGE_GLYPHS = 512;
-  static constexpr uint8_t MAX_PAGE_SLOTS = 8;  // One per font/style pair: body R/B/I/BI plus heading sizes
+  static constexpr uint8_t MAX_PAGE_SLOTS = 4;  // One per font style (R/B/I/BI)
+
+  // Groups a single prewarm will hold in its page buffer. This sizes BOTH of
+  // prewarmCache's stack arrays (neededGroups, groupAlignedTracker) and caps
+  // the counter that indexes them, which is the point of it being one constant:
+  // the three used to be three separate `128` literals that had to agree by
+  // hand, and raising only the cap turned a bounds check into an out-of-bounds
+  // write into groupAlignedTracker.
+  static constexpr uint8_t MAX_PAGE_GROUPS = 128;
 
   FontDecompressor() = default;
   ~FontDecompressor();
@@ -24,7 +32,12 @@ class FontDecompressor {
 
   // Pre-scan UTF-8 text and extract needed glyph bitmaps into a flat page buffer.
   // Each group is decompressed once into a temp buffer; only needed glyphs are kept.
-  // Returns the number of glyphs that couldn't be loaded (0 on full success).
+  // Returns a count of what could not be loaded; 0 means full success.
+  //
+  // That count MIXES UNITS and is only ever logged, never branched on: glyphs
+  // naming no valid group are counted one apiece, while a group that fails to
+  // allocate or decompress counts once for the group however many glyphs it
+  // would have served. Treat it as "was anything lost", not as a glyph total.
   int prewarmCache(const EpdFontData* fontData, const char* utf8Text);
 
   struct Stats {
@@ -48,7 +61,7 @@ class FontDecompressor {
   InflateReader inflateReader;
 
   // Page buffer slots: each style gets its own flat glyph buffer with sorted lookup.
-  // Up to MAX_PAGE_SLOTS font/style pairs can be prewarmed simultaneously.
+  // Up to MAX_PAGE_SLOTS (4) styles can be prewarmed simultaneously.
   struct PageGlyphEntry {
     uint32_t glyphIndex;
     uint32_t bufferOffset;

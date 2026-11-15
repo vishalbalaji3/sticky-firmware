@@ -2,13 +2,20 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Memory.h>
 #include <WiFi.h>
 
+#include <algorithm>
+
+#include "DevMode.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "apps_local/ui/FitText.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/DeviceReport.h"
 #include "network/OtaUpdater.h"
 
 void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
@@ -81,7 +88,17 @@ void OtaUpdateActivity::onEnter() {
 
   // Launch WiFi selection subactivity
   LOG_DBG("OTA", "Launching WifiSelectionActivity...");
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+  auto wifi = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput);
+  if (!wifi) {
+    LOG_ERR("OTA", "OOM: WiFi selection");
+    {
+      RenderLock lock(*this);
+      state = FAILED;
+    }
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(std::move(wifi),
                          [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
 }
 
@@ -92,7 +109,10 @@ void OtaUpdateActivity::onExit() {
   // (loop() above) so the new firmware boots normally. Back-out paths land
   // here with wifi still active; silent-restart to free the LWIP/mbedTLS
   // fragmentation, same as the other wifi activities.
-  if (WiFi.getMode() != WIFI_MODE_NULL) {
+  // Not ours to put down if Developer Mode brought it up: this branch reboots
+  // the device, and doing that every time the updater exits while dev mode
+  // is on is indistinguishable from a crash.
+  if (WiFi.getMode() != WIFI_MODE_NULL && !devmode::holdsRadio()) {
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
@@ -106,7 +126,7 @@ void OtaUpdateActivity::render(RenderLock&&) {
 
   renderer.clearScreen();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_UPDATE));
+  pixelui::drawHeader(renderer, tr(STR_UPDATE), I18N.getLanguage() != Language::EN);
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - height) / 2;
 
@@ -126,11 +146,24 @@ void OtaUpdateActivity::render(RenderLock&&) {
   } else if (state == WAITING_CONFIRMATION) {
     // Version info sits in the upper part of the screen so the centered
     // Cancel/Update popup doesn't cover it (same layout as ConfirmationActivity).
-    const int infoTop = pageHeight / 6;
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop,
-                      (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
-                      (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
+    const int infoTop =
+        std::max(pageHeight / 6, pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).body.y + 8);
+    if (pageWidth > pageHeight) {
+      auto target = toybox::makeTarget(renderer);
+      pixelui::bindFonts(target, renderer);
+      target.setFont(4, UI_10_FONT_ID);
+      const auto body = pixelui::geometry(target.deviceContext()).body;
+      const int width = (body.width - 24) / 2;
+      fittext::draw(target, freeink::ui::makeRect(body.x, infoTop, width, height),
+                    (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str(), 4, 1);
+      fittext::draw(target, freeink::ui::makeRect(body.x + width + 24, infoTop, width, height),
+                    (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str(), 4, 1);
+    } else {
+      renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop,
+                        (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
+      renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
+                        (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
+    }
 
     if (confirmPopup.processRender(renderer, mappedInput)) return;
   } else if (state == UPDATE_IN_PROGRESS) {
@@ -179,6 +212,9 @@ void OtaUpdateActivity::runUpdateInstall() {
     state = UPDATE_IN_PROGRESS;
   }
   requestUpdateAndWait();
+  // Recorded before the install: success reboots the device, so the next
+  // device report infers it from the version that comes up.
+  devreport::noteOtaAttempt("ota");
   const auto res = updater.installUpdate(
       [](void* ctx) {
         // immediate=true notifies the render task directly. The default deferred path only
@@ -190,9 +226,12 @@ void OtaUpdateActivity::runUpdateInstall() {
 
   if (res != OtaUpdater::OK) {
     LOG_DBG("OTA", "Update failed: %d", res);
+    devreport::noteOtaFailed(devreport::otaErrorName(res));
     {
       RenderLock lock(*this);
-      failedDetail = res == OtaUpdater::WRONG_DEVICE_ERROR ? tr(STR_FIRMWARE_WRONG_DEVICE) : nullptr;
+      failedDetail = res == OtaUpdater::WRONG_DEVICE_ERROR ? tr(STR_FIRMWARE_WRONG_DEVICE)
+                     : res == OtaUpdater::TOO_LARGE_ERROR  ? tr(STR_FIRMWARE_TOO_LARGE)
+                                                           : nullptr;
       state = FAILED;
     }
     requestUpdate();

@@ -50,3 +50,50 @@ TEST(HomeButtonInput, RecognizesConfiguredGestures) {
   EXPECT_EQ(input.update(10100, true, false, false, false, A::Home, A::CreateClipping, A::Ignore), A::CreateClipping);
   EXPECT_EQ(input.update(11000, false, true, false, false, A::Home, A::Ignore, A::CreateClipping), A::CreateClipping);
 }
+
+TEST(HomeButtonInput, PendingTapContributesItsDeadlineAcrossClockWrap) {
+  using A = HomeButtonAction;
+  for (uint32_t start : {0u, 1000u, UINT32_MAX - 100u}) {
+    HomeButtonInput input;
+    auto tick = [&](uint32_t now, bool tapped = false, bool held = false, bool swiped = false, bool pressed = false) {
+      return input.update(now, tapped, held, swiped, pressed, A::Home, A::ToggleFrontlight, A::ReaderMenu);
+    };
+    EXPECT_EQ(input.nextActionDelayMs(start, 1000), 1000u);
+    EXPECT_EQ(tick(start, true), A::Ignore);
+    EXPECT_EQ(input.nextActionDelayMs(start, 1000), 351u);
+    EXPECT_EQ(input.nextActionDelayMs(start, 10), 10u);
+    EXPECT_EQ(input.nextActionDelayMs(start, 0), 0u);
+    EXPECT_EQ(input.nextActionDelayMs(start + 350, 1000), 1u);
+    EXPECT_EQ(tick(start + 350), A::Ignore);
+    EXPECT_EQ(input.nextActionDelayMs(start + 351, 1000), 0u);
+    EXPECT_EQ(tick(start + 351), A::Home);
+    EXPECT_EQ(input.nextActionDelayMs(start + 351, 1000), 1000u);
+    EXPECT_EQ(tick(start + 352), A::Ignore);
+
+    EXPECT_EQ(tick(start + 1000, true), A::Ignore);
+    EXPECT_EQ(tick(start + 1100, false, false, false, true), A::Ignore);
+    EXPECT_EQ(input.nextActionDelayMs(start + 1400, 1000), 1000u);
+    EXPECT_EQ(tick(start + 1400), A::Ignore);
+    EXPECT_EQ(tick(start + 1700, false, true), A::ReaderMenu);
+    EXPECT_EQ(input.nextActionDelayMs(start + 1700, 1000), 1000u);
+
+    EXPECT_EQ(tick(start + 2000, true), A::Ignore);
+    EXPECT_EQ(tick(start + 2200, true), A::ToggleFrontlight);
+    EXPECT_EQ(input.nextActionDelayMs(start + 2400, 1000), 1000u);
+    EXPECT_EQ(tick(start + 3000, true), A::Ignore);
+    EXPECT_EQ(tick(start + 3100, false, false, true), A::Ignore);
+    EXPECT_EQ(input.nextActionDelayMs(start + 3400, 1000), 1000u);
+    EXPECT_EQ(input.update(start + 4000, true, false, false, false, A::Home, A::Ignore, A::ReaderMenu), A::Home);
+    EXPECT_EQ(input.nextActionDelayMs(start + 4000, 1000), 1000u);
+  }
+}
+
+TEST(HomeButtonInput, ExpiredTapFollowedByAnotherTapGetsANewDeadline) {
+  using A = HomeButtonAction;
+  HomeButtonInput input;
+  EXPECT_EQ(input.update(0, true, false, false, false, A::Home, A::ToggleFrontlight, A::ReaderMenu), A::Ignore);
+  EXPECT_EQ(input.update(400, true, false, false, false, A::Home, A::ToggleFrontlight, A::ReaderMenu), A::Home);
+  EXPECT_EQ(input.nextActionDelayMs(400, 1000), 351u);
+  input.reset();
+  EXPECT_EQ(input.nextActionDelayMs(800, 1000), 1000u);
+}

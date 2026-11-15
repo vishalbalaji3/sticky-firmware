@@ -13,8 +13,14 @@ class BmpViewerActivity final : public Activity {
   void onEnter() override;
   void onExit() override;
   void loop() override;
+  void prepareForSleep() override { flushImageStats(); }
 
  private:
+  std::string trackedImage;
+  uint32_t statsStartedMs = 0;
+  int64_t statsEpoch = 0;
+  void beginImageStats();
+  void flushImageStats();
   void loadSiblingImages();
   void doSetSleepCover();
   bool canSetSleepCover() const;

@@ -6,6 +6,7 @@
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -107,7 +108,7 @@ void UsbDriveActivity::render(RenderLock&&) {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageWidth = renderer.getScreenWidth();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_USB_DRIVE));
+  pixelui::drawHeader(renderer, tr(STR_USB_DRIVE), I18N.getLanguage() != Language::EN);
 
   renderUi();
 

@@ -7,27 +7,25 @@
 #include <algorithm>
 
 #include "MappedInputManager.h"
+#include "apps_local/ui/PixelMenuTheme.h"
+#include "apps_local/ui/SettingsMenuStyle.h"
 #include "components/UITheme.h"
-#if FREEINK_CAP_TOUCH
-#include "components/UiAppHelpers.h"
-#endif
 #include "fontIds.h"
 
 namespace fui = freeink::ui;
 
 UiListActivity::UiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
-                               const bool wantsTouchLongPress)
-    : Activity(name, renderer, mappedInput), UiAppHost(renderer), wantsTouchLongPress(wantsTouchLongPress) {}
+                               const bool wantsTouchLongPress, const bool pixelChrome)
+    : Activity(name, renderer, mappedInput),
+      UiAppHost(renderer),
+      wantsTouchLongPress(wantsTouchLongPress),
+      pixelChrome(pixelChrome) {}
 
 void UiListActivity::onEnter() {
   Activity::onEnter();
   activeNav().reset();
   resetUi();
   app.on(ACTION_ROW, &UiListActivity::rowActionTrampoline, this);
-#if FREEINK_CAP_TOUCH
-  revealedIndex.store(-1);
-  app.on(ACTION_SWIPE_DELETE, &UiListActivity::swipeDeleteTrampoline, this);
-#endif
   app.setScreen(&UiListActivity::screenTrampoline, this);
   requestUpdate();
 }
@@ -39,91 +37,8 @@ void UiListActivity::screenTrampoline(UiScreen& screen, void* user) {
 void UiListActivity::rowActionTrampoline(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<UiListActivity*>(user);
   if (event.value < 0 || event.value >= self->listCount()) return;
-#if FREEINK_CAP_TOUCH
-  if (self->revealedIndex.load() >= 0) {
-    self->closeSwipeDelete();
-    self->app.clearTapFlash();
-    return;
-  }
-#endif
   self->onRowAction(event);
 }
-
-#if FREEINK_CAP_TOUCH
-void UiListActivity::swipeDeleteTrampoline(const fui::ActionEvent& event, void* user) {
-  auto* self = static_cast<UiListActivity*>(user);
-  if (event.value != self->revealedIndex.load() || !self->canSwipeDelete(event.value)) return;
-  self->closeSwipeDelete();
-  self->app.clearTapFlash();
-  self->swipeDelete(event.value);
-}
-
-void UiListActivity::closeSwipeDelete() {
-  if (revealedIndex.exchange(-1) >= 0) requestUpdate();
-}
-
-void UiListActivity::configureSwipeDelete(UiScreen& screen, fui::ListProps& props) {
-  const int row = revealedIndex.load();
-  if (row < 0 || row >= listCount() || !canSwipeDelete(row)) return;
-  swipeReveal.index = static_cast<int16_t>(row);
-  swipeReveal.action = ACTION_SWIPE_DELETE;
-  swipeReveal.icon = fui::bitmapFromIcon(icon_trash_2_24);
-  swipeReveal.width = static_cast<int16_t>(screen.theme().rowHeight + screen.theme().spaceSm * 2);
-  props.reveal = &swipeReveal;
-}
-
-bool UiListActivity::handleSwipeDeleteInput() {
-  if (!mappedInput.hasTouch()) return false;
-  const int openRow = revealedIndex.load();
-  if (openRow >= 0) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
-        mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      closeSwipeDelete();
-      return true;
-    }
-    int x = 0;
-    int y = 0;
-    if (mappedInput.wasScreenTapped(x, y)) {
-      fui::Interaction hit;
-      bool onDelete;
-      {
-        RenderLock lock(*this);
-        onDelete = routingReady() && app.hitPublished(x, y, ACTION_SWIPE_DELETE, hit) && hit.value == openRow;
-        if (!onDelete && routingReady())
-          app.route(fui::InputSnapshot{.touchReleased = true, .touchX = -1, .touchY = -1});
-      }
-      if (!onDelete) {
-        closeSwipeDelete();
-        return true;
-      }
-    }
-  }
-
-  int x = 0;
-  int y = 0;
-  const auto swipe = mappedInput.wasSwipe(&x, &y);
-  if (swipe == MappedInputManager::SwipeDir::Right && openRow >= 0) {
-    UiAppHost::routeTouch(mappedInput, wantsTouchLongPress);
-    closeSwipeDelete();
-    return true;
-  }
-  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-    closeSwipeDelete();
-    return false;
-  }
-  if (swipe != MappedInputManager::SwipeDir::Left) return false;
-
-  fui::Interaction hit;
-  {
-    RenderLock lock(*this);
-    if (!routingReady() || !app.hitPublished(x, y, ACTION_ROW, hit) || !canSwipeDelete(hit.value)) return false;
-  }
-  UiAppHost::routeTouch(mappedInput, wantsTouchLongPress);
-  revealedIndex.store(hit.value);
-  requestUpdate();
-  return true;
-}
-#endif
 
 void UiListActivity::onRowAction(const fui::ActionEvent& event) {
   activeNav().selected = event.value;
@@ -159,18 +74,12 @@ bool UiListActivity::routeListTouch() {
 }
 
 void UiListActivity::moveSelectionTo(const int index) {
-#if FREEINK_CAP_TOUCH
-  closeSwipeDelete();
-#endif
   activeNav().requestSelection(index);
   requestUpdate();
 }
 
 void UiListActivity::loop() {
   if (handleCustomInput()) return;
-#if FREEINK_CAP_TOUCH
-  if (handleSwipeDeleteInput()) return;
-#endif
   if (handleButtons()) return;
   if (routeListTouch()) return;
 
@@ -209,10 +118,19 @@ void UiListActivity::navigateButtons() {
   });
 }
 
+void UiListActivity::useCompactSettingsRows() {
+  compactSettingsRows = true;
+  const bool pixel = toybox::interfaceFontStyle() == menufont::Style::Pixel;
+  uiTarget.setFont(pixelui::kSmall, pixel ? UI_12_FONT_ID : toybox::kButtonFontId);
+  uiTarget.setFont(4, pixel ? UI_10_FONT_ID : toybox::kLibraryFontId);
+}
+
 void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, const int selectionOffset) {
+  if (pixelChrome) pixelui::styleList(props);
+  if (compactSettingsRows) settingsui::styleRows(props);
   props.toggleCheckbox = true;
-  props.toggleWidth = 28;
-  props.toggleHeight = 28;
+  props.toggleWidth = props.checkboxCheckmark ? 34 : 28;
+  props.toggleHeight = props.toggleWidth;
   props.partialTrailingRow = true;
   auto& n = activeNav();
   const int prevTop = n.top;
@@ -237,6 +155,10 @@ void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, c
 void UiListActivity::drawChrome() {
   const char* title = headerTitle();
   if (!title) return;
+  if (pixelChrome) {
+    pixelui::drawHeader(renderer, title, I18N.getLanguage() != Language::EN);
+    return;
+  }
   const auto& metrics = UITheme::getInstance().getMetrics();
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, title);
 }

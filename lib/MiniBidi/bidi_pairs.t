@@ -1,5 +1,4 @@
 /* bidi_pairs.t — unified mirror + bracket table for CrossPoint.
- * Unicode license and copyright notices: licenses/borrowed-code.txt.
  *
  * Replaces both mirroring.t and brackets.t.  canonical.t is dropped
  * (fullwidth brackets are not used in Hebrew epub content).

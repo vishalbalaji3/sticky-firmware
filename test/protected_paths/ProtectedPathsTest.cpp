@@ -48,9 +48,9 @@ TEST(ProtectedPaths, PluginPathRules) {
   EXPECT_TRUE(isPluginPath("/Books/new.epub"));
 }
 
-TEST(ProtectedPaths, StickyTokenAndNotesStayOffTheWebServer) {
-  EXPECT_TRUE(protectedpaths::isSensitivePath("/.sticky/config.json"));
-  EXPECT_TRUE(protectedpaths::isSensitivePath("/.sticky/notes/abc.wav"));
-  EXPECT_TRUE(protectedpaths::isSensitivePath("//.sticky/./notes/../config.json"));
-  EXPECT_FALSE(protectedpaths::isSensitivePath("/Books/.sticky.epub"));
+TEST(ProtectedPaths, StickyCredentialsAndVoiceFilesStayPrivate) {
+  EXPECT_TRUE(isSensitivePath("/.sticky/config.json"));
+  EXPECT_TRUE(isSensitivePath("/.sticky/notes.json"));
+  EXPECT_TRUE(isSensitivePath("/.STICKY/config.json"));
+  EXPECT_FALSE(isPluginPath("/.sticky/config.json"));
 }

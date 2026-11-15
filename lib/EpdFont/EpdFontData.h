@@ -1,12 +1,8 @@
 // From
 // https://github.com/vroland/epdiy/blob/c61e9e923ce2418150d54f88cea5d196cdc40c54/src/epd_internals.h
-// The EPDiy font layouts use LGPLv3. See licenses/borrowed-code.txt.
 
 #pragma once
 #include <cstdint>
-
-// fontconvert.py, fontconvert_sdcard.py and the vector loader rasterize point sizes at this DPI.
-constexpr uint16_t FONT_RASTER_DPI = 150;
 
 /// Font metrics use "fixed-point 4" (4 fractional bits, i.e. 1/16-pixel
 /// resolution).  Both the 12.4 glyph advances (uint16_t) and the 4.4 kern
@@ -266,4 +262,17 @@ namespace syntheticGlyph {
 constexpr uint32_t FULL_BLOCK = 0x2588;
 constexpr uint32_t BLACK_SQUARE = 0x25A0;
 constexpr bool isSolid(uint32_t cp) { return cp == FULL_BLOCK || cp == BLACK_SQUARE; }
+constexpr bool isSymbol(uint32_t cp) { return cp == 0x2641 || cp == 0x1F728; }
+constexpr bool isSupported(uint32_t cp) { return isSolid(cp) || isSymbol(cp); }
+// One-bit fallback shapes, sampled in glyph coordinates at the current em size.
+inline bool ink(uint32_t cp, int x, int y, int width, int height) {
+  if (isSolid(cp)) return true;
+  if (!isSymbol(cp) || width <= 0 || height <= 0 || x < 0 || y < 0 || x >= width || y >= height) return false;
+  static constexpr uint16_t ORB[] = {0x0180, 0x0180, 0x07E0, 0x0180, 0x0180, 0x03C0, 0x0C30, 0x1818,
+                                     0x1008, 0x1008, 0x1008, 0x1008, 0x1818, 0x0C30, 0x03C0, 0x0000};
+  static constexpr uint16_t CIRCLED_CROSS[] = {0x0000, 0x07E0, 0x1818, 0x2184, 0x4182, 0x4182, 0x4182, 0x7FFE,
+                                               0x7FFE, 0x4182, 0x4182, 0x4182, 0x2184, 0x1818, 0x07E0, 0x0000};
+  const auto* rows = cp == 0x2641 ? ORB : CIRCLED_CROSS;
+  return (rows[y * 16 / height] & (uint16_t(0x8000) >> (x * 16 / width))) != 0;
+}
 }  // namespace syntheticGlyph

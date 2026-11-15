@@ -36,10 +36,6 @@ class HalStorage {
   void endUsbDrive();
   UsbDriveState usbDriveState() const;
   bool usbDriveHostSuspended() const;
-  // Card capacity and used space (the first used-space call scans the FAT; the SDK caches it ~20 s).
-  uint64_t sdTotalBytes();
-  // False means unavailable, including a failed scan; zero can also be a valid result.
-  bool sdUsedBytes(uint64_t& usedBytes);
   std::vector<String> listFiles(const char* path = "/", int maxFiles = 200);
   // Read the entire file at `path` into a String. Returns empty string on failure.
   String readFile(const char* path);
@@ -61,6 +57,21 @@ class HalStorage {
   HalFile open(const char* path, const oflag_t oflag = O_RDONLY);
   bool mkdir(const char* path, const bool pFlag = true);
   bool exists(const char* path);
+
+  // Free bytes on the card. Returns false, leaving `out` untouched, when the
+  // volume could not answer -- which is NOT the same as "no space".
+  //
+  // Every app on this fork that writes to the card has written blind, because
+  // nothing above SDCardManager surfaced this. Trivia declined to ship a
+  // 6.21MB download onto the one card holding a live Anki collection for
+  // exactly that reason. Ask before a large write, and treat false as unknown
+  // rather than as room: deriving it from sdTotalBytes() - sdUsedBytes()
+  // reports a FAILED query as an almost-empty card.
+  //
+  // Costs a FAT walk at most once per 20s (SDCardManager caches it); on FAT32
+  // without a valid FSInfo that walk is seconds, so ask once before a write
+  // rather than per chunk.
+  bool freeBytes(uint64_t& out);
   bool remove(const char* path);
   bool rename(const char* oldPath, const char* newPath);
   // Move a fully written temp file over `path`, replacing any existing file.
@@ -73,6 +84,18 @@ class HalStorage {
   bool openFileForWrite(const char* moduleName, const char* path, HalFile& file);
   bool openFileForWrite(const char* moduleName, const std::string& path, HalFile& file);
   bool openFileForWrite(const char* moduleName, const String& path, HalFile& file);
+  // Open positioned at the end, creating the file if it is not there.
+  // openFileForWrite() carries O_TRUNC, so it cannot be used to add to a file
+  // that already has something in it. Added for the xkcd pack, which grows by
+  // a few records when the device fetches the comics published since the pack
+  // was built; the alternative was copying a 90MB file to add 30KB.
+  bool openFileForAppend(const char* moduleName, const char* path, HalFile& file);
+  // Read-write in place: no O_TRUNC and no append, so a seek followed by a
+  // write actually lands where the seek asked. Needed to patch a header in a
+  // file you are not rewriting -- openFileForWrite would destroy it, and
+  // openFileForAppend sends every write to the end on hosts where it maps to
+  // O_APPEND, which silently made the header land at EOF.
+  bool openFileForUpdate(const char* moduleName, const char* path, HalFile& file);
   bool removeDir(const char* path);
 
   static HalStorage& getInstance() { return instance; }
@@ -102,7 +125,7 @@ class HalFile : public Print {
   HalFile(const HalFile&) = delete;
   HalFile& operator=(const HalFile&) = delete;
 
-  void flush();
+  void flush();  // no-op on a never-assigned handle
   size_t getName(char* name, size_t len);
   size_t size();
   size_t fileSize();
@@ -123,8 +146,10 @@ class HalFile : public Print {
   bool rename(const char* newPath);
   bool isDirectory() const;
   void rewindDirectory();
-  bool close();
+  bool close();  // returns false on a never-assigned handle
   HalFile openNextFile();
+  // Checked enumeration distinguishes end-of-directory from an SD read failure.
+  HalFile openNextFile(bool& ioError);
   bool isOpen() const;
   operator bool() const;
 };

@@ -1,5 +1,6 @@
 #include "FileBrowserActivity.h"
 
+#include <ContentVisibility.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -10,13 +11,19 @@
 #include <algorithm>
 #include <functional>
 
+#include "../../apps_local/library/LibraryMenu.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
+#include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/plugins/PluginCatalogActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "apps_local/home/HomeMenuIntegration.h"
+#include "apps_local/ui/PixelMenuTheme.h"
+#include "apps_local/ui/ToyboxFonts.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
@@ -70,8 +77,7 @@ void formatFileName(const std::string& filename, char* buffer, const size_t buff
   const bool isDirectory = filename.back() == '/';
   const size_t dot = isDirectory ? filename.size() - 1 : filename.rfind('.');
   const int length = static_cast<int>(dot == std::string::npos ? filename.size() : dot);
-  const char* format = isDirectory && !UITheme::getInstance().getTheme().showsFileIcons() ? "[%.*s]" : "%.*s";
-  snprintf(buffer, bufferSize, format, length, filename.c_str());
+  snprintf(buffer, bufferSize, "%.*s", length, filename.c_str());
   // Compose only the display copy; filesystem lookup needs the raw entry bytes.
   utf8ComposeNfcInPlace(buffer);
 }
@@ -86,10 +92,13 @@ FileBrowserActivity::FileBrowserActivity(GfxRenderer& renderer, MappedInputManag
                                          std::string initialPath, const Mode mode)
     : UiListActivity("FileBrowser", renderer, mappedInput, /*wantsTouchLongPress=*/true),
       mode(mode),
-      basepath(initialPath.empty() ? "/" : std::move(initialPath)) {}
+      basepath(initialPath.empty() ? "/" : std::move(initialPath)) {
+  if (mode == Mode::Books) setInterfaceFontSection(menufont::Section::Files);
+}
 
 void FileBrowserActivity::loadFiles() {
   files.clear();
+  unicodeNames = std::any_of(basepath.begin(), basepath.end(), [](unsigned char ch) { return ch >= 0x80; });
   prewarmedStart = -1;  // new folder contents: re-prewarm the visible window
 
   auto root = Storage.open(basepath.c_str());
@@ -122,6 +131,7 @@ void FileBrowserActivity::loadFiles() {
       continue;
     }
 
+    if (isDirectory && basepath == "/" && content::appFolder(fileNameBuffer.get())) continue;
     if (isDirectory) {
       files.emplace_back(std::string(fileNameBuffer.get()) + "/");
     } else {
@@ -139,39 +149,46 @@ void FileBrowserActivity::loadFiles() {
   }
   root.close();
   FsHelpers::sortFileList(files);
+  for (const auto& entry : files) {
+    for (const unsigned char ch : entry) unicodeNames |= ch >= 0x80;
+  }
 }
 
 // fui::ListProps::rowProvider — formats row `index` from files[index] into the
 // activity's scratch buffers on demand. Runs on the render task only for the
 // rows the list actually lays out, so nothing per-file is materialized beyond
 // `files` itself. The label/value pointers stay valid until the next call,
-// which is all the provider contract requires. The "[folder]" format is
-// theme-dependent, but it's re-derived here on every
-// repaint, so a theme change picked up while this activity was paused
-// underneath another screen needs no cache invalidation.
+// which is all the provider contract requires.
+void FileBrowserActivity::pageAction(const fui::ActionEvent& event, void* context) {
+  auto& self = *static_cast<FileBrowserActivity*>(context);
+  RenderLock lock(self);
+  self.activeNav().requestScroll(event.value * self.activeNav().inputPageRows());
+  self.requestUpdate();
+}
+
 void FileBrowserActivity::provideRow(void* ctx, const uint16_t index, fui::ListItem& item) {
   auto* self = static_cast<FileBrowserActivity*>(ctx);
   if (index >= self->files.size()) return;
   const std::string& entry = self->files[index];
   formatFileName(entry, self->rowNameBuf, sizeof(self->rowNameBuf));
   item.label = self->rowNameBuf;
+  item.labelBold = toybox::interfaceFontStyle() == menufont::Style::Pixel && !entry.empty() && entry.back() == '/';
   formatFileExtension(entry, self->rowExtBuf, sizeof(self->rowExtBuf));
   if (self->rowExtBuf[0] != '\0') {
-    item.value = self->rowExtBuf;
+    item.value = self->rowExtBuf + 1;
   }
-  item.icon = listIconFor(UITheme::getFileIcon(entry));
+  item.icon = listIconFor(UITheme::getFileIcon(entry), 32);
+  if (chrome::lightHeader) {
+    item.labelBold = false;
+  }
   item.actionValue = static_cast<int16_t>(index);
 }
 
 // Batch-prewarm the CJK fallback glyphs for a bounded window of display names
 // starting at the viewport top — one SD pass per list page (the reader TOC's
 // refreshTocWindow pattern) instead of one unbounded pass over the whole
-// folder. Getter form: no concatenated copy (a bare-new string append aborts
-// under heap pressure). The last index covers the bottom path band: basepath
-// (possibly a CJK folder name) draws in the same small font, so it must live
-// in the same batch or it would evict the rows' glyphs when the heap gate
-// disables union merging. (prewarmFallbackText appends the truncation
-// ellipsis.)
+// folder. Getter form avoids a concatenated copy. Include basepath in the
+// row batch too, in case the UI scale shares its fallback with the path font.
 void FileBrowserActivity::prewarmRowGlyphs(const int start) {
   const int total = static_cast<int>(files.size());
   int clamped = start;
@@ -187,7 +204,7 @@ void FileBrowserActivity::prewarmRowGlyphs(const int start) {
     int count;
   } prewarmCtx{this, clamped, count};
   renderer.prewarmFallbackText(
-      uiScaleSpec().smallFontId,
+      uiScaleSpec().bodyFontId,
       [](const void* ctx, uint32_t i) -> const char* {
         auto* c = const_cast<PrewarmCtx*>(static_cast<const PrewarmCtx*>(ctx));
         if (i < static_cast<uint32_t>(c->count)) {
@@ -197,10 +214,12 @@ void FileBrowserActivity::prewarmRowGlyphs(const int start) {
         return c->self->basepath.c_str();
       },
       &prewarmCtx, static_cast<uint32_t>(count) + 1);
+  renderer.prewarmFallbackText(SMALL_FONT_ID, basepath.c_str());
 }
 
 void FileBrowserActivity::onEnter() {
   UiListActivity::onEnter();
+  app.on(ACTION_PAGE, &FileBrowserActivity::pageAction, this);
 
   fileNameBuffer = makeUniqueNoThrow<char[]>(NAME_BUFFER_SIZE);
   if (!fileNameBuffer) {
@@ -329,13 +348,6 @@ void FileBrowserActivity::onRowLongPress(const int index) {
   }
 }
 
-#if FREEINK_CAP_TOUCH
-void FileBrowserActivity::swipeDelete(const int index) {
-  nav.selected = index;
-  deleteSelected();
-}
-#endif
-
 void FileBrowserActivity::activateSelected() {
   if (files.empty()) return;
   // A touch activation can carry a row index captured before a delete/reload
@@ -428,11 +440,11 @@ void FileBrowserActivity::deleteSelected() {
       }
       nav.follow(listCount());
     }
-    requestUpdate(true);
+    requestUpdate();
   };
 
-  auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_ITEM_CONFIRM),
-                                                              utf8ComposeNfc(entry));
+  const std::string heading = tr(STR_DELETE) + std::string("? ");
+  auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, heading, utf8ComposeNfc(entry));
   if (!confirmation) {
     LOG_ERR("FileBrowser", "OOM: delete confirmation");
     return;
@@ -511,7 +523,7 @@ void FileBrowserActivity::renameSelectedFile(const std::string& oldPath, const s
     nav.selected = static_cast<int>(findEntry(newEntry));
     nav.follow(listCount());
   }
-  requestUpdate(true);
+  requestUpdate();
 }
 
 bool FileBrowserActivity::handleCustomInput() {
@@ -601,44 +613,27 @@ std::string getFileExtension(const std::string& filename) {
 }
 
 void FileBrowserActivity::buildScreen(UiScreen& screen) {
+  const bool unicode = unicodeNames || I18N.getLanguage() != Language::EN;
+  pixelui::FontScope fonts(uiTarget, renderer, unicode);
   const auto& metrics = UITheme::getInstance().getMetrics();
-  // Content below the GUI.drawHeader band, above the button hints.
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
-
-  // Full path band at the bottom: separator on top, left-truncated so the
-  // deepest directory stays visible.
-  {
-    const int pathLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
-    const fui::Rect band = screen.takeBottom(static_cast<int16_t>(pathLineHeight + metrics.verticalSpacing));
-    screen.target().fill(fui::Rect{band.x, band.y, band.width, 3}, fui::Paint::solid(fui::Color::Black));
-    const int pathY =
-        band.y + metrics.verticalSpacing / 2 + (band.height - metrics.verticalSpacing / 2 - pathLineHeight) / 2;
-    const int pathMaxWidth = band.width - metrics.contentSidePadding * 2;
-    const char* pathStr = basepath.c_str();
-    const char* pathDisplay = pathStr;
-    char leftTruncBuf[256];
-    if (renderer.getTextWidth(SMALL_FONT_ID, pathStr) > pathMaxWidth) {
-      const char ellipsis[] = "\xe2\x80\xa6";  // UTF-8 ellipsis (…)
-      const int ellipsisWidth = renderer.getTextWidth(SMALL_FONT_ID, ellipsis);
-      const int available = pathMaxWidth - ellipsisWidth;
-      // Walk forward from the start until the suffix fits, skipping UTF-8 continuation bytes
-      const char* p = pathStr;
-      while (*p) {
-        if (renderer.getTextWidth(SMALL_FONT_ID, p) <= available) break;
-        ++p;
-        while (*p && (static_cast<unsigned char>(*p) & 0xC0) == 0x80) ++p;
-      }
-      snprintf(leftTruncBuf, sizeof(leftTruncBuf), "%s%s", ellipsis, p);
-      pathDisplay = leftTruncBuf;
-    }
-    renderer.drawText(SMALL_FONT_ID, band.x + metrics.contentSidePadding, pathY, pathDisplay);
+  pixelui::begin(screen, libraryui::kFooterHeight + (mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight));
+  if (chrome::lightHeader) {
+    const auto body = screen.body();
+    screen.setContentMarginAbsolute({int16_t(std::max(chrome::headerHeight, int(body.y) - 6)),
+                                     int16_t(screen.device().width - body.right()),
+                                     int16_t(screen.device().height - body.bottom()), body.x});
   }
+
+  const int pathLength = std::snprintf(pathLabel, sizeof(pathLabel), tr(STR_BROWSER_MICROSD_PATH), basepath.c_str(),
+                                       basepath == "/" ? "" : "/");
+  const char* footerLocation = pathLength < 0 || size_t(pathLength) >= sizeof(pathLabel) ? basepath.c_str() : pathLabel;
 
   if (files.empty()) {
     screen.centeredText(mode == Mode::PickFirmware ? tr(STR_NO_BIN_FILES) : tr(STR_NO_FILES_FOUND),
                         screen.theme().bodyText);
+    char count[48];
+    std::snprintf(count, sizeof(count), tr(STR_BROWSER_ITEMS), 0U);
+    libraryui::statusFooter(screen, footerLocation, count);
     return;
   }
 
@@ -649,37 +644,35 @@ void FileBrowserActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   // Tap opens/navigates; long-press shows entry actions (physical buttons stay in loop()).
   props.inputMask = fui::InputTouch | fui::InputLongPress;
-  props.valueInset = 8;  // air between the extension and the row edge
-  // Names use up to two small-font lines; shared list layout sizes each row.
-  fui::TextStyle label = screen.theme().smallText;
-  label.maxLines = 2;
-  props.labelText = label;
-
-  // The trailing value here is just the short extension: skip the balanced
-  // 60%-band wrap cap and let both name lines run the full width before it.
-  props.balanceWrappedLabelWithValue = false;
+  uiTarget.setFont(4, toybox::kBookListFontId);
+  libraryui::styleBookRows(props, screen.target());
+  if (chrome::lightHeader) {
+    libraryui::lightRows(props);
+  }
+  libraryui::fitPortraitRows(props, screen.device(), screen.body());
+  props.rtl =
+      (I18N.getLanguage() == Language::AR || I18N.getLanguage() == Language::FA || I18N.getLanguage() == Language::HE);
   syncListViewport(screen, props);
   // Prewarm the window at the final viewport (syncListViewport just applied
   // follow/clamping to nav.top) before the list resolves rows through the
   // provider.
   prewarmRowGlyphs(nav.top);
-#if FREEINK_CAP_TOUCH
-  if (mode == Mode::Books) configureSwipeDelete(screen, props);
-#endif
-  screen.list(props);
+  props.partialTrailingRow = false;
+  if (chrome::lightHeader) {
+    fui::list(screen.frame(), screen.body(), props);
+  } else
+    pixelui::list(screen, props, false, false, 2);
+  char count[48];
+  std::snprintf(count, sizeof(count), tr(STR_BROWSER_ITEMS), unsigned(files.size()));
+  libraryui::statusFooter(screen, footerLocation, count);
 }
 
 void FileBrowserActivity::drawChrome() {
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-
-  std::string folderName =
-      (mode == Mode::PickFirmware)
-          ? std::string(tr(STR_SELECT_FIRMWARE_FILE))
-          : ((basepath == "/") ? std::string(tr(STR_SD_CARD)) : basepath.substr(basepath.rfind('/') + 1));
-  // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
-  // indicator; the rest of the screen renders through the app.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, folderName.c_str());
+  const char* folderName = mode == Mode::PickFirmware ? tr(STR_SELECT_FIRMWARE_FILE)
+                           : chrome::lightHeader      ? tr(STR_BROWSE_FILES)
+                           : basepath == "/"          ? tr(STR_SD_CARD)
+                                                      : basepath.c_str() + basepath.rfind('/') + 1;
+  pixelui::drawHeader(renderer, folderName, unicodeNames || I18N.getLanguage() != Language::EN);
 }
 
 void FileBrowserActivity::drawFooter() {
@@ -698,3 +691,5 @@ size_t FileBrowserActivity::findEntry(const std::string& name) const {
   const auto entry = std::find(files.begin(), files.end(), name);
   return entry != files.end() ? static_cast<size_t>(entry - files.begin()) : 0;
 }
+
+void FileBrowserActivity::loop() { UiListActivity::loop(); }

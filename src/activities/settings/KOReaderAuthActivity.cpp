@@ -5,11 +5,13 @@
 #include <Logging.h>
 #include <WiFi.h>
 
+#include "DevMode.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncClient.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/WifiPowerSaveGuard.h"
@@ -30,7 +32,11 @@ void KOReaderAuthActivity::onWifiSelectionComplete(const bool success) {
     state = AUTHENTICATING;
     statusMessage = mode == Mode::SIGN_UP ? tr(STR_CREATING_ACCOUNT) : tr(STR_AUTHENTICATING);
   }
-  requestUpdate();
+  // immediate: performAuthentication() opens TLS and blocks this task, and a
+  // deferred update is only a flag ActivityManager::loop() consumes at a tail
+  // it cannot reach until that returns -- so the AUTHENTICATING screen below
+  // existed, was correct, and never once reached the panel. #306.
+  requestUpdate(true);
 
   performAuthentication();
 }
@@ -70,7 +76,10 @@ void KOReaderAuthActivity::onEnter() {
 void KOReaderAuthActivity::onExit() {
   Activity::onExit();
 
-  if (WiFi.getMode() != WIFI_MODE_NULL) {
+  // Not ours to drop if Developer Mode raised it. Every other wifi user here
+  // either tracks its own ownership flag or asks this; a bare getMode() check
+  // means "somebody has the radio", not "I do".
+  if (WiFi.getMode() != WIFI_MODE_NULL && !devmode::holdsRadio()) {
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
@@ -84,8 +93,8 @@ void KOReaderAuthActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                 mode == Mode::SIGN_UP ? tr(STR_SIGN_UP) : tr(STR_KOREADER_AUTH));
+  pixelui::drawHeader(renderer, mode == Mode::SIGN_UP ? tr(STR_SIGN_UP) : tr(STR_KOREADER_AUTH),
+                      I18N.getLanguage() != Language::EN);
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - height) / 2;
 

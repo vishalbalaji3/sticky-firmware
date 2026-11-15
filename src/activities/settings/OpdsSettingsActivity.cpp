@@ -1,33 +1,30 @@
 #include "OpdsSettingsActivity.h"
 
 #include <GfxRenderer.h>
-#include <HttpHeader.h>
 #include <I18n.h>
 #include <Logging.h>
 
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
 namespace {
-// Editable fields: Name, URL, Username, Password, Custom Header 1, Custom
-// Header 2. Existing servers also show a Delete option (BASE_ITEMS + 1).
-constexpr int BASE_ITEMS = 6;
-constexpr int CUSTOM_HEADER_1_INDEX = 4;
-constexpr int CUSTOM_HEADER_2_INDEX = 5;
+// Editable fields: Name, URL, Username, Password.
+// Existing servers also show a Delete option (BASE_ITEMS + 1).
+constexpr int BASE_ITEMS = 4;
 }  // namespace
 
 OpdsSettingsActivity::OpdsSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                            const int serverIndex)
-    : UiListActivity("OpdsSettings", renderer, mappedInput), serverIndex(serverIndex) {
+    : UiListActivity("OpdsSettings", renderer, mappedInput, false, true), serverIndex(serverIndex) {
   // Labels never change (unlike the values, which track editServer's fields
   // live), so they're set once here rather than every buildScreen() call.
-  static constexpr StrId fieldNames[BASE_ITEMS] = {StrId::STR_SERVER_NAME,     StrId::STR_OPDS_SERVER_URL,
-                                                   StrId::STR_USERNAME,        StrId::STR_PASSWORD,
-                                                   StrId::STR_CUSTOM_HEADER_1, StrId::STR_CUSTOM_HEADER_2};
+  static constexpr StrId fieldNames[BASE_ITEMS] = {StrId::STR_SERVER_NAME, StrId::STR_OPDS_SERVER_URL,
+                                                   StrId::STR_USERNAME, StrId::STR_PASSWORD};
   for (int i = 0; i < BASE_ITEMS; i++) {
     fieldRowItems[i].label = I18N.get(fieldNames[i]);
     fieldRowItems[i].actionValue = static_cast<int16_t>(i);
@@ -154,23 +151,7 @@ void OpdsSettingsActivity::handleSelection() {
     startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_PASSWORD),
                                                                    editServer.password, 63, InputType::Text),
                            handler);
-  } else if (nav.selected == CUSTOM_HEADER_1_INDEX || nav.selected == CUSTOM_HEADER_2_INDEX) {
-    // Custom Header 1 or 2 - single "Name: Value" line, parsed on save.
-    const size_t slot = static_cast<size_t>(nav.selected == CUSTOM_HEADER_1_INDEX ? 0 : 1);
-    const StrId label = nav.selected == CUSTOM_HEADER_1_INDEX ? StrId::STR_CUSTOM_HEADER_1 : StrId::STR_CUSTOM_HEADER_2;
-    const std::string prefill = formatHttpHeaderLine(editServer.customHeaders[slot]);
-    auto handler = [this, slot](const ActivityResult& result) {
-      if (!result.isCancelled) {
-        const auto& kb = std::get<KeyboardResult>(result.data);
-        parseHttpHeaderLine(kb.text, editServer.customHeaders[slot]);
-        saveServer();
-        requestUpdate();
-      }
-    };
-    startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, I18N.get(label), prefill, 160, InputType::Text),
-        handler);
-  } else if (nav.selected == BASE_ITEMS && !isNewServer) {
+  } else if (nav.selected == 4 && !isNewServer) {
     // Delete flow is only available for existing servers.
     if (!OPDS_STORE.removeServer(static_cast<size_t>(serverIndex))) {
       LOG_ERR("OPS", "Failed to remove OPDS server at index %d", serverIndex);
@@ -183,15 +164,12 @@ void OpdsSettingsActivity::handleSelection() {
 }
 
 void OpdsSettingsActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
   // Content below the GUI.drawHeader band, above the button hints; derived
   // from the safe area so board bezel insets apply (same as LanguageSelect).
-  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  screen.setContentMarginFromScreen(
-      fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
-                  static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
-                  static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) + metrics.buttonHintsHeight),
-                  static_cast<int16_t>(safe.x)});
+  pixelui::begin(screen, mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
 
   // URL hint where the old sub-header band sat.
   const fui::Rect band = screen.takeTop(static_cast<int16_t>(metrics.tabBarHeight));
@@ -202,15 +180,10 @@ void OpdsSettingsActivity::buildScreen(UiScreen& screen) {
   // fieldRowItems' labels/actionValue were set once in the constructor; only
   // the live value pointers (already pointing at editServer's own fields, no
   // new strings built) need refreshing here.
-  fieldRowItems[0].value = editServer.name.empty() ? tr(STR_NOT_SET) : editServer.name.c_str();
-  fieldRowItems[1].value = editServer.url.empty() ? tr(STR_NOT_SET) : editServer.url.c_str();
-  fieldRowItems[2].value = editServer.username.empty() ? tr(STR_NOT_SET) : editServer.username.c_str();
-  fieldRowItems[3].value = editServer.password.empty() ? tr(STR_NOT_SET) : "******";
-  for (size_t i = 0; i < OpdsServer::MAX_CUSTOM_HEADERS; i++) {
-    headerDisplayBuf[i] = formatHttpHeaderLine(editServer.customHeaders[i], true);
-    fieldRowItems[CUSTOM_HEADER_1_INDEX + i].value =
-        headerDisplayBuf[i].empty() ? tr(STR_NOT_SET) : headerDisplayBuf[i].c_str();
-  }
+  fieldRowItems[0].subtitle = editServer.name.empty() ? tr(STR_NOT_SET) : editServer.name.c_str();
+  fieldRowItems[1].subtitle = editServer.url.empty() ? tr(STR_NOT_SET) : editServer.url.c_str();
+  fieldRowItems[2].subtitle = editServer.username.empty() ? tr(STR_NOT_SET) : editServer.username.c_str();
+  fieldRowItems[3].subtitle = editServer.password.empty() ? tr(STR_NOT_SET) : "******";
 
   fui::ListProps props;
   props.items = fieldRowItems;
@@ -218,12 +191,8 @@ void OpdsSettingsActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   props.valueInset = 8;               // air between the value and the row edge
-  // Label at the value's font size: both sides of the row read as one unit.
-  // maxLines=2 also marks the style caller-owned (see textStyleUnset).
-  props.labelText = screen.theme().smallText;
-  props.labelText.maxLines = 2;
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }
 
 const char* OpdsSettingsActivity::headerTitle() const {

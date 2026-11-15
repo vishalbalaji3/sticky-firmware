@@ -11,20 +11,24 @@
 
 #include <cstddef>
 
+#include "DevMode.h"
 #include "MappedInputManager.h"
 #include "NetworkModeSelectionActivity.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
 #include "activities/network/CalibreConnectActivity.h"
+#include "apps_local/ui/NetworkLandscape.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/DeviceHostname.h"
 #include "util/PluginEvents.h"
 #include "util/QrUtils.h"
 #include "util/TaskWatchdog.h"
 
 namespace {
 // AP Mode configuration
-constexpr const char* AP_SSID = "CrossPoint-Reader";
+constexpr const char* AP_SSID = "Sticky-CrossNext";
 // Regenerated per session and shown on screen. The open stock hotspot would send Wi-Fi passwords in clear.
 char apPassword[11] = {};
 
@@ -72,6 +76,10 @@ int barsForRssi(int rssi, int currentBars) {
 
 void CrossPointWebServerActivity::onEnter() {
   Activity::onEnter();
+  // This activity binds 80/81/8134 itself, and the dev-mode server may already
+  // hold them. Two binds on one port fails in a way that reads as "the web
+  // screen is broken", so dev mode yields for as long as the screen is up.
+  devmode::pause();
 
   LOG_DBG("WEBACT", "Free heap at onEnter: %d bytes", ESP.getFreeHeap());
 
@@ -120,6 +128,9 @@ void CrossPointWebServerActivity::onExit() {
   LOG_DBG("WEBACT", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
 
   state = WebServerActivityState::SHUTTING_DOWN;
+  // Closes the listening socket and any queued client connections; they must go
+  // before the radio teardown below frees the netif they hang off.
+  webServer.reset();
   stopDnsServer();
   MDNS.end();
 
@@ -129,15 +140,31 @@ void CrossPointWebServerActivity::onExit() {
   pluginevents::refreshSubscriptions();
 
   // Skip reboot if WiFi was never activated (e.g. user backed out of mode selection).
+  //
+  // Also skip it when Developer Mode holds the radio. The reboot exists to
+  // return the radio to a clean state, and dev mode is going to re-establish
+  // STA the moment resume() above lets it -- so restarting would cost the user
+  // their place for nothing, every single time they close this screen. An AP
+  // still gets torn down, because that one really was ours.
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     if (isApMode) {
       WiFi.softAPdisconnect(true);
-    } else {
+    } else if (!devmode::holdsRadio()) {
       WiFi.disconnect(false);
     }
-    delay(30);
-    silentRestart();
+    if (!devmode::holdsRadio()) {
+      delay(30);
+      silentRestart();
+    }
   }
+
+  // LAST, after this screen has finished putting its own radio down. When
+  // resume() still joined synchronously, calling it first meant dev mode took
+  // the radio at the top of this function and the softAP teardown below tore it
+  // out again. The join is deferred to update() now, but the ordering is still
+  // right on its own terms: the radio is handed back when this screen is done
+  // with it, and holdsRadio() above is read while the yield is still held.
+  devmode::resume();
 
   LOG_DBG("WEBACT", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
 }
@@ -223,7 +250,7 @@ void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) 
     isApMode = false;
 
     // Start mDNS for hostname resolution
-    restartMdns(AP_HOSTNAME, "WEBACT");
+    restartMdns(devicehost::mdnsName(), "WEBACT");
 
     // Start the web server
     startWebServer();
@@ -274,7 +301,7 @@ void CrossPointWebServerActivity::startAccessPoint() {
   LOG_DBG("WEBACT", "IP: %s", connectedIP.c_str());
 
   // Start mDNS for hostname resolution
-  restartMdns(AP_HOSTNAME, "WEBACT");
+  restartMdns(devicehost::mdnsName(), "WEBACT");
 
   // Start DNS server for captive portal behavior
   // This redirects all DNS queries to our IP, making any domain typed resolve to us
@@ -302,7 +329,7 @@ void CrossPointWebServerActivity::startWebServer() {
   }
 
   // Create the web server instance
-  webServer.reset(new CrossPointWebServer());
+  webServer.reset(new CrossPointWebServer(CrossPointWebServer::Surface::Full));
   // An upload holds loop() inside handleClient(), so input is sampled on each received chunk instead. On a slow
   // link chunks come ~0.5 s apart, so a button found down gets a second sample past the SDK's 5 ms debounce.
   webServer->setUploadCancelCheck([this] {
@@ -451,11 +478,13 @@ void CrossPointWebServerActivity::render(RenderLock&&) {
     const auto pageWidth = renderer.getScreenWidth();
     const auto pageHeight = renderer.getScreenHeight();
 
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                   isApMode ? tr(STR_HOTSPOT_MODE) : tr(STR_FILE_TRANSFER), nullptr);
+    pixelui::drawHeader(renderer, isApMode ? tr(STR_HOTSPOT_MODE) : tr(STR_FILE_TRANSFER),
+                        I18N.getLanguage() != Language::EN, nullptr);
 
     if (state == WebServerActivityState::SERVER_RUNNING) {
-      GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
+      GUI.drawSubHeader(renderer,
+                        Rect{0, pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).header.bottom() + 4,
+                             pageWidth, metrics.tabBarHeight},
                         connectedSSID.c_str());
       renderServerRunning();
     } else {
@@ -471,13 +500,39 @@ void CrossPointWebServerActivity::renderServerRunning() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                 isApMode ? tr(STR_HOTSPOT_MODE) : tr(STR_FILE_TRANSFER), nullptr);
-  GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
+  pixelui::drawHeader(renderer, isApMode ? tr(STR_HOTSPOT_MODE) : tr(STR_FILE_TRANSFER),
+                      I18N.getLanguage() != Language::EN, nullptr);
+  GUI.drawSubHeader(renderer,
+                    Rect{0, pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).header.bottom() + 4,
+                         pageWidth, metrics.tabBarHeight},
                     connectedSSID.c_str());
 
   if (!isApMode) {
-    renderWifiIndicator(metrics.topPadding + metrics.headerHeight);
+    renderWifiIndicator(pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).header.bottom() + 4);
+  }
+
+  if (pageWidth > renderer.getScreenHeight()) {
+    auto target = toybox::makeTarget(renderer);
+    pixelui::bindFonts(target, renderer);
+    const auto layout = networkui::transferLayout(target.deviceContext(), metrics.tabBarHeight, isApMode);
+    const std::string hostnameUrl = std::string("http://") + devicehost::mdnsName() + ".local/";
+    const std::string ipUrl = std::string("http://") + connectedIP + "/";
+    networkui::transferText(target, layout, isApMode, connectedSSID.c_str(),
+                            isApMode ? hostnameUrl.c_str() : ipUrl.c_str(),
+                            isApMode ? ipUrl.c_str() : hostnameUrl.c_str());
+    const auto drawQr = [&](freeink::ui::Rect r, const std::string& value) {
+      QrUtils::drawQrCode(renderer, Rect{r.x, r.y, r.width, r.height}, value);
+    };
+    if (isApMode) {
+      const std::string wifiConfig = std::string("WIFI:T:nopass;S:") + connectedSSID + ";;";
+      drawQr(layout.firstQr, wifiConfig);
+      drawQr(layout.secondQr, hostnameUrl);
+    } else {
+      drawQr(layout.firstQr, ipUrl);
+    }
+    const auto labels = mappedInput.mapLabels(tr(STR_EXIT), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    return;
   }
 
   int startY = metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing * 2;
@@ -507,7 +562,7 @@ void CrossPointWebServerActivity::renderServerRunning() const {
                       EpdFontFamily::BOLD);
     startY += height10 + metrics.verticalSpacing * 2;
 
-    std::string hostnameUrl = std::string("http://") + AP_HOSTNAME + ".local/";
+    std::string hostnameUrl = std::string("http://") + devicehost::mdnsName() + ".local/";
     std::string ipUrl = tr(STR_OR_HTTP_PREFIX) + connectedIP + "/";
 
     // Show QR code for URL
@@ -540,7 +595,7 @@ void CrossPointWebServerActivity::renderServerRunning() const {
     startY += height10 + 5;
 
     // Also show hostname URL
-    std::string hostnameUrl = std::string(tr(STR_OR_HTTP_PREFIX)) + AP_HOSTNAME + ".local/";
+    std::string hostnameUrl = std::string(tr(STR_OR_HTTP_PREFIX)) + devicehost::mdnsName() + ".local/";
     renderer.drawCenteredText(SMALL_FONT_ID, startY, hostnameUrl.c_str(), true);
   }
 

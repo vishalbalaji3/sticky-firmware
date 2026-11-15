@@ -23,12 +23,16 @@ struct WifiNetworkInfo {
   bool isHiddenPlaceholder = false;  // Synthetic "Add hidden network..." list entry
 };
 
+enum class WifiSelectionPurpose : uint8_t { Connect, Manage };
+
 // WiFi selection states
 enum class WifiSelectionState {
   AUTO_CONNECTING,    // Trying to connect to the last known network
   SCANNING,           // Scanning for networks
   NETWORK_LIST,       // Displaying available networks
   HIDDEN_SSID_ENTRY,  // Entering SSID for a hidden network
+  PASSWORD_REVIEW,
+  NETWORK_DETAILS,
   PASSWORD_ENTRY,     // Entering password for selected network
   CONNECTING,         // Attempting to connect
   CONNECTED,          // Successfully connected
@@ -50,6 +54,19 @@ enum class WifiSelectionState {
  */
 class WifiSelectionActivity final : public Activity, private UiAppHost {
   ButtonNavigator buttonNavigator;
+  const WifiSelectionPurpose purpose;
+  bool wifiEnabled = true;
+  bool passwordVisible = false;
+  enum class Protection : uint8_t { Unknown, Open, Protected };
+  Protection currentProtection = Protection::Unknown;
+  std::string currentSSID;
+  int32_t currentRssi = -100;
+  freeink::ui::ButtonProps referenceButton;
+  char referenceText[160]{};
+  void completeConnection();
+  void showDetails();
+  void buildReferenceScreen(UiScreen& screen);
+  static void onReferenceEvent(const freeink::ui::ActionEvent& event, void* user);
 
   WifiSelectionState state = WifiSelectionState::SCANNING;
   size_t selectedNetworkIndex = 0;
@@ -72,6 +89,25 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   // Connection result
   std::string connectedIP;
   std::string connectionError;
+
+  // Why the last REMEMBERED network failed, kept for the network list to show.
+  // Auto-connect never reaches CONNECTION_FAILED -- handleAutoConnectFailure()
+  // returns before the state assignment that draws connectionError -- so
+  // without this the user waits seven seconds per saved network and is then
+  // handed a bare list with no reason on it anywhere.
+  //
+  // It says why auto-connect GAVE UP, so every way the USER stops it early
+  // clears it: on entry, on a rescan they asked for, on a manual connection
+  // attempt, and on both cancels (Confirm during the attempt and Confirm
+  // during the rescan a failure started). An auto-scan is the continuation of
+  // the attempt that set it, so that one keeps it.
+  //
+  // KNOWN IMPRECISION, left deliberately: with several saved networks tried in
+  // a row and none cancelled, the line shows the LAST one's reason. Naming the
+  // SSID as well would put a user-supplied string into a band with a pixel
+  // budget, and the failed network is identifiable in the list by its saved
+  // marker.
+  std::string autoConnectError;
 
   // Password to potentially save (from keyboard or saved credentials)
   std::string enteredPassword;
@@ -141,7 +177,8 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   void onComplete(bool connected);
 
  public:
-  explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool autoConnect = true);
+  explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool autoConnect = true,
+                                 WifiSelectionPurpose purpose = WifiSelectionPurpose::Connect);
   void onEnter() override;
   void onExit() override;
   void loop() override;

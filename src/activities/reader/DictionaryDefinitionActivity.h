@@ -1,47 +1,51 @@
 #pragma once
 
 #include <Epub/Page.h>
-#include <I18n.h>
 
-#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "ClipSelectionActivity.h"
 #include "activities/Activity.h"
+#include "apps_local/words/DictionaryScreen.h"
+#include "apps_local/words/VocabularyStorage.h"
+#include "components/UiAppHost.h"
 #include "util/ButtonNavigator.h"
-#include "util/Dictionary.h"
 
 // Paged viewer for one dictionary definition. HTML definitions are laid out
 // through the EPUB chapter parser into styled Pages; anything else (plain
 // text, or HTML too damaged to parse) is word-wrapped once on entry and each
 // page renders spans of the original string, so no per-line copies are held.
-class DictionaryDefinitionActivity final : public Activity {
+class DictionaryDefinitionActivity final : public Activity, protected UiAppHost {
  public:
   explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string headword,
-                                        std::string definition, bool htmlDefinition = false)
+                                        std::string definition, bool htmlDefinition = false,
+                                        vocabulary::CaptureNotice captureNotice = {})
       : Activity("DictionaryDefinition", renderer, mappedInput),
-        content{.headword = std::move(headword), .text = std::move(definition)},
-        htmlDefinition(htmlDefinition) {}
-
-  bool enableLookup(Dictionary& dictionary, std::string&& query);
+        UiAppHost(renderer),
+        headword(std::move(headword)),
+        definition(std::move(definition)),
+        htmlDefinition(htmlDefinition),
+        captureNotice(captureNotice) {}
 
   void onEnter() override;
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  bool handleHomeGesture() override {
+    finish();
+    return true;
+  }
+  bool handleReaderTextSettingsGesture() override { return handleHomeGesture(); }
+  void offerVocabulary(std::unique_ptr<vocabulary::Context>, const char* dictionary, const char* language);
 
  private:
   // One wrapped display line: a byte span of `definition`. Wrapping keeps
   // lines under the screen width, so uint16_t length is ample.
-  struct PlainSelectionLine;
-
   struct Line {
     uint32_t start;
     uint16_t len;
-    bool bold;
   };
 
   // Usable body-text area between the header and the button hints.
@@ -53,63 +57,32 @@ class DictionaryDefinitionActivity final : public Activity {
   };
 
   BodyArea bodyArea() const;
+  bool layoutHtmlPages();
+  void wrapText();
+  int measureSpan(int fontId, const char* text, size_t len) const;
+  void drawBody(int fontId, int x, int startY) const;
+  void turnPage(int delta);
 
-  struct Definition {
-    std::string headword;
-    std::string text;
-    std::vector<std::unique_ptr<Page>> pages;
-    std::vector<Line> lines;
-    int currentPage = 0;
-    int totalPages = 1;
-    int linesPerPage = 1;
-    int selectionPage = 0;
-    ClipSelectionActivity::Selection selection;
-
-    void releasePayload() {
-      std::string{}.swap(text);
-      std::vector<std::unique_ptr<Page>>{}.swap(pages);
-      std::vector<Line>{}.swap(lines);
-    }
-  };
-
-  // Replay the original query: the displayed headword may be a stem or synonym.
-  struct HistoryEntry {
-    std::string query;
-    int page = 0;
-    int selectionPage = 0;
-    ClipSelectionActivity::Selection selection;
-    bool styled = false;
-  };
-
-  struct LookupState {
-    explicit LookupState(Dictionary& dictionary) : dictionary(dictionary) {}
-    Dictionary& dictionary;  // Owned by the retained DictionaryWordSelectActivity parent.
-    std::array<HistoryEntry, 16> history;
-    size_t depth = 0;
-    std::string query;
-    std::string pendingWord;
-    std::vector<std::unique_ptr<Page>> selectionPages;
-  };
-
-  bool prepareDefinition(Definition& next, bool forcePlain = false);
-  bool layoutHtmlPages(Definition& next);
-  bool wrapText(Definition& next);
-  bool prepareFont(std::string& definition, int fontId);
-  bool reserveLines(Definition& next, size_t count);
-  int measureSpan(int fontId, const char* text, size_t len, EpdFontFamily::Style family = EpdFontFamily::REGULAR) const;
-  void drawBody(int fontId, int x, int startY, int currentPage) const;
-  void startSelection(int x = -1, int y = -1);
-  bool buildPlainSelectionPages();
-  void navigateDefinition(bool back);
-  bool restoreCurrentDefinition(bool styled);
-  void showMessage(StrId message);
-
-  Definition content;
+  const std::string headword;
+  // Not const: onEnter() normalizes embedded NULs (StarDict multi-type
+  // separators) to newlines so C-string APIs see the whole text.
+  std::string definition;
   const bool htmlDefinition;
-  std::unique_ptr<LookupState> lookup;
-  StrId message = StrId::STR_DICT_NOT_FOUND;
-  unsigned long messageTime = 0;
-  bool messageVisible = false;
-  bool initialLayoutFailed = false;
+  // Styled path: reader-identical Pages laid out from the HTML definition.
+  // Empty means the plain-text span path below is active.
+  std::vector<std::unique_ptr<Page>> pages;
+  std::vector<Line> lines;
+  int currentPage = 0;
+  int totalPages = 1;
+  int linesPerPage = 1;
+  int definitionFontId = 0;
   ButtonNavigator buttonNavigator;
+  vocabulary::CaptureNotice captureNotice;
+  std::unique_ptr<vocabulary::Context> source;
+  char dictionaryName[32]{}, sourceLanguage[32]{};
+  bool savePending = false;
+  unsigned long noticeAt = 0;
+  bool noticeBrief = false, undoPending = false, undone = false;
+  dictionaryui::Work chrome;
+  static void noticeScreen(UiScreen&, void*);
 };

@@ -10,6 +10,7 @@
 
 #include "FootnoteEntry.h"
 #include "PageLink.h"
+#include "PageReadBudget.h"
 #include "blocks/ImageBlock.h"
 #include "blocks/TextBlock.h"
 
@@ -17,8 +18,6 @@ enum PageElementTag : uint8_t {
   TAG_PageLine = 1,
   TAG_PageImage = 2,
   TAG_PageHorizontalRule = 3,
-  TAG_PageDropCap = 4,
-  TAG_PageBorderBox = 5,
 };
 
 // represents something that has been added to a page
@@ -29,7 +28,7 @@ class PageElement {
   explicit PageElement(const int16_t xPos, const int16_t yPos) : xPos(xPos), yPos(yPos) {}
   virtual ~PageElement() = default;
   virtual void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) = 0;
-  virtual bool serialize(HalFile& file) = 0;
+  virtual bool serialize(Print& file) = 0;
   virtual PageElementTag getTag() const = 0;  // Add type identification
 };
 
@@ -42,9 +41,9 @@ class PageLine final : public PageElement {
       : PageElement(xPos, yPos), block(std::move(block)) {}
   const TextBlock* getBlock() const { return block.get(); }
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
-  bool serialize(HalFile& file) override;
+  bool serialize(Print& file) override;
   PageElementTag getTag() const override { return TAG_PageLine; }
-  static std::unique_ptr<PageLine> deserialize(HalFile& file);
+  static std::unique_ptr<PageLine> deserialize(HalFile& file, PageReadBudget* budget = nullptr);
 };
 
 // New PageImage class
@@ -56,7 +55,7 @@ class PageImage final : public PageElement {
       : PageElement(xPos, yPos), imageBlock(std::move(block)) {}
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
   void renderPlaceholder(GfxRenderer& renderer, int xOffset, int yOffset) const;
-  bool serialize(HalFile& file) override;
+  bool serialize(Print& file) override;
   PageElementTag getTag() const override { return TAG_PageImage; }
   static std::unique_ptr<PageImage> deserialize(HalFile& file);
   const ImageBlock& getImageBlock() const { return *imageBlock; }
@@ -71,54 +70,9 @@ class PageHorizontalRule final : public PageElement {
       : PageElement(xPos, yPos), width(width), thickness(thickness) {}
 
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
-  bool serialize(HalFile& file) override;
+  bool serialize(Print& file) override;
   PageElementTag getTag() const override { return TAG_PageHorizontalRule; }
   static std::unique_ptr<PageHorizontalRule> deserialize(HalFile& file);
-};
-
-// An initial letter spanning several lines, drawn scaled up from a font's glyph.
-// yPos is the baseline of the last spanned line.
-class PageDropCap final : public PageElement {
- public:
-  static constexpr size_t MAX_TEXT_BYTES = 12;  // leading punctuation plus the letter
-
- private:
-  int32_t fontId;
-  uint16_t scale256;
-  EpdFontFamily::Style style;
-  char text[MAX_TEXT_BYTES + 1] = {};
-
- public:
-  PageDropCap(int32_t fontId, uint16_t scale256, EpdFontFamily::Style style, const char* utf8, int16_t xPos,
-              int16_t yPos);
-  const char* getText() const { return text; }
-  void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
-  bool serialize(HalFile& file) override;
-  PageElementTag getTag() const override { return TAG_PageDropCap; }
-  static std::unique_ptr<PageDropCap> deserialize(HalFile& file);
-};
-
-// A CSS border and/or background shade around a block element's slice on this page.
-// Sides split off by a page break have zero width.
-class PageBorderBox final : public PageElement {
-  uint16_t width;
-  uint16_t height;
-  CssBorderSide sides[4];  // top, right, bottom, left
-  bool shaded;
-
- public:
-  PageBorderBox(uint16_t width, uint16_t height, const CssBorderSide (&sides)[4], bool shaded, int16_t xPos,
-                int16_t yPos)
-      : PageElement(xPos, yPos),
-        width(width),
-        height(height),
-        sides{sides[0], sides[1], sides[2], sides[3]},
-        shaded(shaded) {}
-  void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
-  bool serialize(HalFile& file) override;
-  PageElementTag getTag() const override { return TAG_PageBorderBox; }
-  static std::unique_ptr<PageBorderBox> deserialize(HalFile& file);
-  void renderBackground(GfxRenderer& renderer, int xOffset, int yOffset) const;
 };
 
 class Page {
@@ -128,7 +82,10 @@ class Page {
   std::vector<FootnoteEntry> footnotes;
   static constexpr uint16_t MAX_FOOTNOTES_PER_PAGE = 16;
   std::vector<PageLink> links;
-  static constexpr uint16_t MAX_LINKS_PER_PAGE = 32;
+  // 96 rather than 32: a Wikipedia lead runs one link per five words, and a
+  // link past the cap silently becomes plain text. Serialized as a count, so
+  // caches written under the old cap still load.
+  static constexpr uint16_t MAX_LINKS_PER_PAGE = 96;
 
   // Zero-based visible-codepoint offset where this page starts. Not part of the serialized page
   // body (it lives in the section's visible-offset LUT); Section::loadPage* fills it in from the
@@ -167,8 +124,8 @@ class Page {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) const;
   void renderImages(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) const;
   void renderWithImagePlaceholders(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) const;
-  bool serialize(HalFile& file) const;
-  static std::unique_ptr<Page> deserialize(HalFile& file);
+  bool serialize(Print& file) const;
+  static std::unique_ptr<Page> deserialize(HalFile& file, PageReadBudget* budget = nullptr);
 
   // Check if page contains any images (used to force full refresh)
   bool hasImages() const {

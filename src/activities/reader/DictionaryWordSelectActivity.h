@@ -7,6 +7,7 @@
 #include <string>
 
 #include "activities/Activity.h"
+#include "apps_local/words/VocabularyStorage.h"
 #include "util/Dictionary.h"
 
 // Controller for dictionary lookup: renders the background page, runs the
@@ -17,12 +18,18 @@ class DictionaryWordSelectActivity final : public Activity {
  public:
   explicit DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                         std::unique_ptr<Page> page, int marginLeft, int marginTop,
-                                        std::string lookupText = {})
+                                        std::string lookupText = {}, std::unique_ptr<vocabulary::Context> source = {},
+                                        std::string sourceLanguage = {}, bool captureRequested = false,
+                                        bool translate = false)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
         marginTop(marginTop),
-        lookupText(std::move(lookupText)) {}
+        lookupText(std::move(lookupText)),
+        source(std::move(source)),
+        sourceLanguage(std::move(sourceLanguage)),
+        captureRequested(captureRequested),
+        translate(translate) {}
 
   void onEnter() override;
   void loop() override;
@@ -39,6 +46,10 @@ class DictionaryWordSelectActivity final : public Activity {
   int fontId = 0;
 
   std::string lookupText;
+  std::unique_ptr<vocabulary::Context> source;
+  std::string sourceLanguage;
+  const bool captureRequested;
+  const bool translate;
   bool lookupPending = false;
   Dictionary dict;
   bool dictOpenAttempted = false;

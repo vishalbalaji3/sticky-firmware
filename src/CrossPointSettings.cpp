@@ -1,6 +1,6 @@
 #include "CrossPointSettings.h"
 
-#include <BlePageTurnerJson.h>
+#include <BoardConfig.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <ObfuscationUtils.h>
@@ -13,11 +13,10 @@
 
 #include "I18nKeys.h"
 #include "ReaderFontSizes.h"
-#include "ReaderLineSpacing.h"
 #include "SettingsList.h"
 #include "fontIds.h"
+#include "util/InterfaceThemeStyle.h"
 #include "util/ParagraphIndentMigration.h"
-#include "util/PluginLocations.h"
 
 namespace {
 
@@ -67,11 +66,12 @@ uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue)
 
 void CrossPointSettings::toJson(JsonDocument& doc) const {
   const CrossPointSettings& s = *this;
+  doc["readingDailyGoal"] = readingDailyGoal;
 
-  auto visit = [&](const SettingInfo& info) {
-    if (!info.key) return;
+  for (const auto& info : getSettingsList(nullptr, nullptr, /*forPersistence=*/true)) {
+    if (!info.key) continue;
     // Dynamic entries (KOReader etc.) are stored in their own files — skip.
-    if (!info.valuePtr && !info.stringOffset) return;
+    if (!info.valuePtr && !info.stringOffset) continue;
 
     if (info.stringOffset) {
       const char* strPtr = (const char*)&s + info.stringOffset;
@@ -85,8 +85,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
     } else {
       doc[info.key] = s.*(info.valuePtr);
     }
-  };
-  forEachBaseSetting(visit);
+  }
 
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
   doc["frontButtonBack"] = frontButtonBack;
@@ -95,12 +94,39 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["frontButtonRight"] = frontButtonRight;
   // Font family and size — both use dynamic getter/setters in SettingsList (the
   // option lists depend on the SD font registry), so the generic loop skips them.
-  doc["fontFamily"] = STORED_NOTOSANS;
+  doc["fontFamily"] = fontFamily;
   doc["fontSize"] = fontPointSize;
+  doc["fontWeight"] = fontWeight;
+  doc["libraryView"] = libraryView;
+  doc["libraryLayout"] = libraryLayout;
+  doc["libraryClassicGrid"] = libraryClassicGrid;
+  doc["libraryClassicExpanded"] = libraryClassicExpanded;
+  doc["librarySortMethod"] = librarySortMethod;
+  doc["librarySortDirections"] = librarySortDirections;
+  doc["libraryExpandedList"] = libraryExpandedList;
+  doc["libraryDisplay"] = libraryDisplay;
+  doc["libraryFileTypes"] = libraryFileTypes;
+  doc["weekStartsSunday"] = weekStartsSunday;
+  doc["readingFormats"] = readingFormats;
+  doc["homeLayout"] = homeLayout;
+  doc["homeLayoutVersion"] = 2;
+  doc["interfaceThemeStyle"] = interfaceThemeStyle;
+  auto themeOverrides = doc["interfaceThemeOverrides"].to<JsonArray>();
+  for (int n = 2; n < menufont::kSectionCount; ++n) themeOverrides.add(interfaceThemeOverrides[n]);
+  auto fonts = doc["menuFontOverrides"].to<JsonArray>();
+  for (int n = 1; n < menufont::kSectionCount; ++n) fonts.add(menuFontOverrides[n]);
+  auto contentFonts = doc["menuFontItems"].to<JsonObject>();
+  for (int n = 0; n < menufont::kItemCount; ++n)
+    if (menuFontItemOverrides[n]) contentFonts[menufont::kItemKeys[n]] = menuFontItemOverrides[n];
+  auto quick = doc["quickActions"].to<JsonArray>();
+  for (uint8_t action : quickActions) quick.add(action);
   // SD card font family name — not in SettingsList, save manually
   if (sdFontFamilyName[0] != '\0') {
     doc["sdFontFamilyName"] = sdFontFamilyName;
   }
+  if (*translationDictionaryName) doc["translationDictionaryName"] = translationDictionaryName;
+  doc["dictionaryAuto"] = dictionaryAuto;
+  doc["translationDictionaryAuto"] = translationDictionaryAuto;
   // Dictionary folder name — uses dynamic getter/setter in SettingsList, save manually
   if (dictionaryName[0] != '\0') {
     doc["dictionaryName"] = dictionaryName;
@@ -119,20 +145,54 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (keyboardLayouts != 0) {
     doc["keyboardLayouts"] = keyboardLayouts;
   }
-
-  bleturner::writeJson(ble, doc);
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   CrossPointSettings& s = *this;
   bool needsResave = false;
+  readingDailyGoal = doc["readingDailyGoal"].is<uint8_t>() && doc["readingDailyGoal"].as<uint8_t>() < 10
+                         ? doc["readingDailyGoal"].as<uint8_t>()
+                         : 0;
+  const auto commonTheme = doc["interfaceThemeStyle"];
+  interfaceThemeStyle = commonTheme.is<uint8_t>() ? uint8_t(interfacetheme::normalized(commonTheme.as<uint8_t>())) : 0;
+  const auto themeOverrides = doc["interfaceThemeOverrides"];
+  for (int n = 2; n < menufont::kSectionCount; ++n) {
+    const auto value = themeOverrides[n - 2];
+    interfaceThemeOverrides[n] = value.is<uint8_t>() ? uint8_t(interfacetheme::normalized(value.as<uint8_t>())) : 0;
+  }
+  const auto fonts = doc["menuFontOverrides"];
+  for (int n = 1; n < menufont::kSectionCount; ++n) {
+    const auto value = fonts[n - 1];
+    menuFontOverrides[n] = value.is<uint8_t>() ? uint8_t(menufont::normalizedOverride(value.as<uint8_t>())) : 0;
+    if (value.is<uint8_t>() && value.as<uint8_t>() != menuFontOverrides[n]) needsResave = true;
+  }
+  for (int n = 0; n < menufont::kItemCount; ++n) {
+    const auto value = doc["menuFontItems"][menufont::kItemKeys[n]];
+    menuFontItemOverrides[n] = value.is<uint8_t>() ? uint8_t(menufont::normalizedOverride(value.as<uint8_t>())) : 0;
+    if (value.is<uint8_t>() && value.as<uint8_t>() != menuFontItemOverrides[n]) needsResave = true;
+  }
+  if (doc["quickActions"].is<JsonArrayConst>() && doc["quickActions"].size() == quickui::kSlots) {
+    uint16_t used = 0;
+    for (int n = 0; n < quickui::kSlots; ++n) {
+      const auto value = doc["quickActions"][n];
+      uint8_t action = value.is<uint8_t>() ? value.as<uint8_t>() : uint8_t(quickui::Shortcut::Count);
+      if (action >= uint8_t(quickui::Shortcut::Count) || (used & (1u << action))) {
+        needsResave = true;
+        action = 0;
+        while (used & (1u << action)) ++action;
+      }
+      quickActions[n] = action;
+      used |= 1u << action;
+    }
+  } else if (!doc["quickActions"].isNull())
+    needsResave = true;
 
   auto clamp = [](uint8_t val, uint8_t maxVal, uint8_t def) -> uint8_t { return val < maxVal ? val : def; };
 
-  auto visit = [&](const SettingInfo& info) {
-    if (!info.key) return;
+  for (const auto& info : getSettingsList(nullptr, nullptr, /*forPersistence=*/true)) {
+    if (!info.key) continue;
     // Dynamic entries (KOReader etc.) are stored in their own files — skip.
-    if (!info.valuePtr && !info.stringOffset) return;
+    if (!info.valuePtr && !info.stringOffset) continue;
 
     if (info.stringOffset) {
       // destPtr starts out holding the struct-initializer default; it stays that
@@ -142,7 +202,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
         LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
         destPtr[0] = '\0';
         needsResave = true;
-        return;
+        continue;
       }
 
       bool loaded = false;
@@ -188,22 +248,11 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       }
       s.*(info.valuePtr) = v;
     }
-  };
-  forEachBaseSetting(visit);
-
-  // Keep landscape swapping opt-in when loading older settings.
-  if (doc["sideButtonFollowOrientation"].isNull()) {
-    sideButtonFollowOrientation = 0;
-    needsResave = true;
   }
 
-  // Plugin System did not exist in older settings files. Preserve the behavior
-  // of users who already have SD plugins installed, while keeping the new
-  // default disabled on clean installs.
-  if (doc["pluginsEnabled"].isNull()) {
-    pluginsEnabled = PluginLocations::anyPluginInstalledOnDisk() ? 1 : 0;
-    needsResave = true;
-  }
+  const auto normalizedFont = uint8_t(menufont::normalized(menuFontStyle));
+  if (menuFontStyle != normalizedFont) needsResave = true;
+  menuFontStyle = normalizedFont;
 
   const auto indentSpaces = doc["paragraphIndentSpaces"];
   const bool hasSavedWidth = indentSpaces.is<int>();
@@ -232,12 +281,6 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     sleepTimeoutMinutes = sleepTimeoutEnumToMinutes(legacyValue);
     needsResave = true;
   }
-  // "lineSpacing" saves predate the 1.0 option: Tight/Normal/Wide/Extra Wide (0..3) become 1.1..1.45.
-  if (doc["lineHeight"].isNull() && doc["lineSpacing"].is<uint8_t>()) {
-    const int legacyValue = doc["lineSpacing"].as<uint8_t>();
-    lineSpacing = legacyValue + 1 < LINE_COMPRESSION_COUNT ? static_cast<uint8_t>(legacyValue + 1) : LINE_SPACING_120;
-    needsResave = true;
-  }
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
   frontButtonBack = clamp(doc["frontButtonBack"] | (uint8_t)FRONT_HW_BACK, FRONT_BUTTON_HARDWARE_COUNT, FRONT_HW_BACK);
   frontButtonConfirm =
@@ -257,14 +300,35 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     needsResave = true;
   }
   fontPointSize = storedFontSize;
+  libraryView = (doc["libraryView"] | 0) == 1 ? 1 : 0;
+  libraryLayout = (doc["libraryLayout"] | 0) == 1 ? 1 : 0;
+  libraryClassicGrid = (doc["libraryClassicGrid"] | 1) != 0;
+  libraryClassicExpanded = (doc["libraryClassicExpanded"] | 0) != 0;
+  librarySortMethod = std::min(uint8_t(doc["librarySortMethod"] | 0), uint8_t(6));
+  librarySortDirections = uint8_t(doc["librarySortDirections"] | 1) & 0x7f;
+  libraryExpandedList = (doc["libraryExpandedList"] | 1) != 0;
+  libraryDisplay = uint8_t(doc["libraryDisplay"] | 7) & 7;
+  libraryFileTypes = uint8_t(doc["libraryFileTypes"] | 15) & 15;
+  weekStartsSunday = (doc["weekStartsSunday"] | 0) == 1 ? 1 : 0;
+  readingFormats = uint8_t(doc["readingFormats"] | 7) & 63;
+  homeLayout = uint8_t(doc["homeLayout"] | HOME_FRAMED);
+  // The retired third layout migrates to the remaining carousel.
+  if (homeLayout == HOME_BOOX && (doc["homeLayoutVersion"] | 0) < 2) {
+    homeLayout = HOME_CAROUSEL;
+    needsResave = true;
+  } else if (homeLayout >= HOME_LAYOUT_COUNT) {
+    homeLayout = HOME_FRAMED;
+  }
+  fontWeight = clamp(doc["fontWeight"] | (uint8_t)FONT_WEIGHT_REGULAR, FONT_WEIGHT_COUNT, FONT_WEIGHT_REGULAR);
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
-  const uint8_t storedFontFamily = doc["fontFamily"] | STORED_NOTOSANS;
-  fontFamily = NOTOSANS;
+  const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
+  // Retired built-in families fall back to Noto Serif; SD families keep their name.
+  fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
   // These controls use board-specific display-index mappings and are skipped by
   // the generic settings loop. Persisted action IDs remain stable across boards.
   longPressMenuFunction = clamp(doc["longPressMenuFunction"] | (uint8_t)LP_MENU_DISABLED,
-                                (uint8_t)LONG_PRESS_MENU_FUNCTION_COUNT, (uint8_t)LP_MENU_DISABLED);
+                                (uint8_t)(LP_MENU_CREATE_CLIPPING + 1), (uint8_t)LP_MENU_DISABLED);
   shortPwrBtn = clamp(doc["shortPwrBtn"] | (uint8_t)IGNORE, (uint8_t)SHORT_PWRBTN_COUNT, (uint8_t)IGNORE);
   if (BoardConfig::hasHomeKey() && doc["homeButtonLongPressAction"].isNull() &&
       !doc["longPressMenuFunction"].isNull()) {
@@ -277,23 +341,43 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     }
   }
 
+  if (std::strcmp(homeButtonShortcutTitle, "BESTIARY") == 0) {
+    copyToField(homeButtonShortcutTitle, "READING QUEST", sizeof(homeButtonShortcutTitle));
+    needsResave = true;
+  }
+
+  if (homeButtonDoubleTapAction == uint8_t(HomeButtonAction::OpenShortcut)) {
+    homeButtonDoubleTapAction = uint8_t(HomeButtonAction::OpenDoubleShortcut);
+    needsResave = true;
+  }
+  if (homeButtonLongPressAction == uint8_t(HomeButtonAction::OpenShortcut)) {
+    homeButtonLongPressAction = uint8_t(HomeButtonAction::OpenLongShortcut);
+    needsResave = true;
+  }
+  if (doc["homeButtonDoubleShortcutTitle"].isNull())
+    copyToField(homeButtonDoubleShortcutTitle, homeButtonShortcutTitle, sizeof(homeButtonDoubleShortcutTitle));
+  if (doc["homeButtonLongShortcutTitle"].isNull())
+    copyToField(homeButtonLongShortcutTitle, homeButtonShortcutTitle, sizeof(homeButtonLongShortcutTitle));
+
   // SD card font family name — not in SettingsList, load manually
   const char* sfn = doc["sdFontFamilyName"] | "";
   strncpy(sdFontFamilyName, sfn, sizeof(sdFontFamilyName) - 1);
   sdFontFamilyName[sizeof(sdFontFamilyName) - 1] = '\0';
-  if (sdFontFamilyName[0] == '\0') {
-    switch (storedFontFamily) {
-      case LEGACY_NOTOSERIF:
-        copyToField(sdFontFamilyName, "NotoSerif", sizeof(sdFontFamilyName));
-        break;
-      case LEGACY_OPENDYSLEXIC:
-        copyToField(sdFontFamilyName, "OpenDyslexic", sizeof(sdFontFamilyName));
-        break;
-    }
+  if (storedFontFamily == LEGACY_OPENDYSLEXIC && sdFontFamilyName[0] == '\0') {
+    fontFamily = NOTOSERIF;
+    strncpy(sdFontFamilyName, "OpenDyslexic", sizeof(sdFontFamilyName) - 1);
+    sdFontFamilyName[sizeof(sdFontFamilyName) - 1] = '\0';
+    needsResave = true;
+  } else if (storedFontFamily >= BUILTIN_FONT_COUNT) {
+    needsResave = true;
   }
-  if (storedFontFamily != STORED_NOTOSANS) needsResave = true;
+  copyToField(translationDictionaryName, doc["translationDictionaryName"] | "", sizeof(translationDictionaryName));
   // Dictionary folder name — uses dynamic getter/setter in SettingsList, load manually
   copyToField(dictionaryName, doc["dictionaryName"] | "", sizeof(dictionaryName));
+  // Preserve legacy named choices; previously empty selections adopt the defaults.
+  dictionaryAuto = doc["dictionaryAuto"].is<bool>() ? doc["dictionaryAuto"].as<bool>() : dictionaryName[0] == '\0';
+  translationDictionaryAuto = doc["translationDictionaryAuto"].is<bool>() ? doc["translationDictionaryAuto"].as<bool>()
+                                                                          : translationDictionaryName[0] == '\0';
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {
     language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));
@@ -302,10 +386,6 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Absent means unconfigured, which is the default.
   if (doc["keyboardLayouts"].is<uint16_t>()) {
     keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
-  }
-
-  if (!bleturner::readJson(ble, doc)) {
-    needsResave = true;
   }
 
   if (needsResave) {
@@ -348,14 +428,43 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   spec.viewportHeight = viewportHeight;
   spec.hyphenationEnabled = hyphenationEnabled != 0;
   spec.embeddedStyle = embeddedStyle != 0;
-  // Same layout as Display, so switching between them keeps the section cache.
-  spec.imageRendering = imageRendering == IMAGES_DISPLAY_BW ? static_cast<uint8_t>(IMAGES_DISPLAY) : imageRendering;
+  spec.imageRendering = imageRendering;
   spec.focusReadingEnabled = focusReadingEnabled != 0;
+  spec.forceBold = fontWeight == FONT_WEIGHT_BOLD;
   return spec;
 }
 
 float CrossPointSettings::getReaderLineCompression() const {
-  return LINE_SPACING_MULTIPLIERS[lineSpacing < LINE_COMPRESSION_COUNT ? lineSpacing : LINE_SPACING_120];
+  // SD card and vector fonts get a wider scale than the built-ins: their
+  // faces carry their own (often generous) natural line height, so the old
+  // Bookerly-tuned 1.1/1.2 steps were visually near-indistinguishable. At
+  // 12pt in portrait (~760px viewport) this scale spans ~26/24/19/15 lines
+  // per page — each step reads as a clearly different density.
+  if (sdFontFamilyName[0] != '\0') {
+    switch (lineSpacing) {
+      case TIGHT:
+        return 0.95f;
+      case NORMAL:
+      default:
+        return 1.0f;
+      case WIDE:
+        return 1.3f;
+      case EXTRA_WIDE:
+        return 1.6f;
+    }
+  }
+
+  switch (lineSpacing) {
+    case TIGHT:
+      return 0.95f;
+    case NORMAL:
+    default:
+      return 1.0f;
+    case WIDE:
+      return 1.1f;
+    case EXTRA_WIDE:
+      return 1.2f;
+  }
 }
 
 unsigned long CrossPointSettings::getSleepTimeoutMs() const {
@@ -408,13 +517,13 @@ int CrossPointSettings::getReaderFontId() const {
       snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES), fontPointSize);
   switch (pt) {
     case 12:
-      return NOTOSANS_12_FONT_ID;
+      return NOTOSERIF_12_FONT_ID;
     case 16:
-      return NOTOSANS_16_FONT_ID;
+      return NOTOSERIF_16_FONT_ID;
     case 18:
-      return NOTOSANS_18_FONT_ID;
+      return NOTOSERIF_18_FONT_ID;
     case 14:
     default:
-      return NOTOSANS_14_FONT_ID;
+      return NOTOSERIF_14_FONT_ID;
   }
 }

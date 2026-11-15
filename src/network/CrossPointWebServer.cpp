@@ -6,39 +6,40 @@
 #include <Crypto.h>
 #include <DeviceSecret.h>
 #include <FsHelpers.h>
+#include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalMemory.h>
 #include <HalStorage.h>
-#include <HiddenItems.h>
+#include <HalSystem.h>
 #include <I18n.h>
 #include <LibraryBuilder.h>
 #include <Logging.h>
-#include <MD5Builder.h>
 #include <Memory.h>
 #include <ResumableFetch.h>
 #include <SecureHttpClient.h>
-#include <Utf8.h>
 #include <Util.h>
 #include <WiFi.h>
 #include <WolfsslCrypto.h>
 #include <base64.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
-#include <fcntl.h>
-#include <lwip/sockets.h>
-#include <unistd.h>
+#include <esp_ota_ops.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/hash.h>
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
 
+#include "../apps_local/notes/NotesCore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
+#include "DevInputCommands.h"
+#include "DevMode.h"
+#include "DevSerialBridge.h"
+#include "FirmwareFlasher.h"
 #include "FontInstaller.h"
 #include "OpdsServerStore.h"
 #include "ProtectedPaths.h"
@@ -47,35 +48,27 @@
 #include "WebDAVHandler.h"
 #include "WifiCredentialStore.h"
 #include "WifiPowerSaveGuard.h"
+#include "apps_local/wallpapers/WallpapersCore.h"
 #include "html/FilesPageHtml.generated.h"
 #include "html/FontsPageHtml.generated.h"
 #include "html/HomePageHtml.generated.h"
-#include "html/PluginsPageHtml.generated.h"
+#include "html/NotesPageHtml.generated.h"
 #include "html/RunnerPageHtml.generated.h"
 #include "html/SettingsPageHtml.generated.h"
-#include "html/assets/crosspoint_iconSvg.generated.h"
-#include "html/assets/iconsSvg.generated.h"
-#include "html/assets/webCss.generated.h"
-#include "html/js/epub_optimizerJs.generated.h"
+#include "html/WallpaperPageHtml.generated.h"
 #include "html/js/jszip_minJs.generated.h"
-#include "html/js/plugin_hostJs.generated.h"
+#include "html/js/wallconvertJs.generated.h"
 #include "util/BookCacheUtils.h"
 #include "util/DictionaryRegistry.h"
-#include "util/FirmwareIdentity.h"
 #include "util/PluginHttp.h"
 #include "util/PluginLocations.h"
 #include "util/TaskWatchdog.h"
-#include "util/UrlUtils.h"
-
-static void sendStaticContent(WebServer* server, const char* data, size_t len, const char* etag,
-                              const char* contentType);
 
 namespace {
 // Arduino's WebServer retains parsed request arguments until the next request.
 // For JSON POSTs, that includes the complete "plain" body. Expose a narrowly
 // scoped release operation so large request bodies do not remain resident
 // between requests, and so outbound TLS can reuse that memory immediately.
-// It also closes a client whose reply stalls.
 class CrossPointHttpServer final : public WebServer {
  public:
   explicit CrossPointHttpServer(uint16_t port) : WebServer(port) {}
@@ -93,36 +86,27 @@ class CrossPointHttpServer final : public WebServer {
     }
     _postArgsLen = 0;
   }
-
- protected:
-  // NetworkClient::write gives up after ten seconds without progress and
-  // returns a short count, but WebServer ignores it and writes the next chunk,
-  // so a stalled reply blocks the server for minutes. Close the client instead:
-  // later writes then fail at once and the handler soon returns.
-  size_t _currentClientWrite(const char* b, const size_t l) override {
-    return checkedWrite(l, WebServer::_currentClientWrite(b, l));
-  }
-  size_t _currentClientWrite_P(PGM_P b, const size_t l) override {
-    return checkedWrite(l, WebServer::_currentClientWrite_P(b, l));
-  }
-
- private:
-  size_t checkedWrite(const size_t wanted, const size_t sent) {
-    if (sent < wanted && _currentClient.connected()) {
-      LOG_ERR("WEB", "Client stalled after %u of %u bytes, closing it", static_cast<unsigned>(sent),
-              static_cast<unsigned>(wanted));
-      _currentClient.stop();
-    }
-    return sent;
-  }
 };
 
 void releaseRequestArguments(WebServer* server) {
   static_cast<CrossPointHttpServer*>(server)->releaseRequestArguments();
 }
 
+// Folders/files to hide from the web interface file browser
+// Note: Items starting with "." are automatically hidden
+constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
+
+// Formats the library index tracks (LibraryIndex isBookName): an upload of any
+// of these must mark the index dirty so the next Library entry rebuilds it.
+bool isLibraryBookFile(const String& filename) {
+  return FsHelpers::checkFileExtension(filename, ".epub") || FsHelpers::checkFileExtension(filename, ".txt") ||
+         FsHelpers::checkFileExtension(filename, ".md") || FsHelpers::checkFileExtension(filename, ".xtc");
+}
 constexpr uint16_t UDP_PORTS[] = {54982, 48123, 39001, 44044, 59678};
 constexpr uint16_t LOCAL_UDP_PORT = 8134;
+
+// Where Developer Mode uploads land. Fixed on purpose; see handleDevUploadData.
+constexpr const char* kDevUploadPath = "/.crosspoint/devmode-firmware.bin";
 
 // Static pointer for WebSocket callback (WebSocketsServer requires C-style callback)
 CrossPointWebServer* wsInstance = nullptr;
@@ -140,30 +124,6 @@ size_t wsLastProgressSent = 0;
 String wsLastCompleteName;
 size_t wsLastCompleteSize = 0;
 unsigned long wsLastCompleteAt = 0;
-// millis() of each client's last event, 0 for a free slot.
-uint32_t wsLastActivity[WEBSOCKETS_SERVER_CLIENT_MAX] = {};
-
-// A client that vanishes mid-upload (phone asleep, Wi-Fi lost) would keep its
-// slot and the upload lock until TCP gives up. Clients send START right after
-// connecting and then data without pause, so close one that has sent nothing
-// for two minutes; a browser runs timers in a hidden tab only once a minute.
-// A ping heartbeat would not do: the Calibre plugin does not answer pings while
-// it uploads.
-constexpr uint32_t WS_IDLE_TIMEOUT_MS = 120000;
-
-void closeIdleWsClients(WebSocketsServer& ws) {
-  const uint32_t now = millis();
-  for (uint8_t i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++) {
-    if (wsLastActivity[i] == 0) {
-      // Time a new client from its first sight, so one that never finishes the
-      // handshake (and so never raises an event) is closed too.
-      if (ws.clientIsConnected(i)) wsLastActivity[i] = now;
-    } else if (now - wsLastActivity[i] > WS_IDLE_TIMEOUT_MS && ws.clientIsConnected(i)) {
-      LOG_INF("WS", "Client %u sent nothing for %u s, closing it", i, (unsigned)(WS_IDLE_TIMEOUT_MS / 1000));
-      ws.disconnect(i);  // Its DISCONNECTED event frees the slot's time
-    }
-  }
-}
 
 String normalizeWebPath(const String& inputPath) {
   if (inputPath.isEmpty() || inputPath == "/") {
@@ -187,59 +147,10 @@ bool isProtectedItemName(const String& name) {
   if (name.startsWith(".")) {
     return true;
   }
-  for (const auto* item : FsHelpers::HIDDEN_ITEMS) {
+  for (const auto* item : HIDDEN_ITEMS) {
     if (name.equals(item)) {
       return true;
     }
-  }
-  return false;
-}
-
-// Collects a streamed reply into ~1 KB chunks. Each sendContent() is three
-// socket writes; hundreds of tiny writes fill lwIP's send queue (errno 11) and
-// stall the single-threaded server for seconds while other requests wait.
-// A Print, so serializeJson() writes straight into the chunk buffer.
-class ChunkedReply final : public Print {
- public:
-  explicit ChunkedReply(WebServer& server) : server_(server) {}
-  using Print::write;
-  size_t write(uint8_t c) override { return write(&c, 1); }
-  size_t write(const uint8_t* data, size_t len) override {
-    if (used_ + len > sizeof(buffer_)) flush();
-    if (len >= sizeof(buffer_)) {
-      server_.sendContent(reinterpret_cast<const char*>(data), len);
-      return len;
-    }
-    memcpy(buffer_ + used_, data, len);
-    used_ += len;
-    return len;
-  }
-  void flush() override {
-    if (used_ == 0) return;
-    server_.sendContent(buffer_, used_);
-    used_ = 0;
-  }
-  // Ends the chunked stream after the buffered data.
-  void end() {
-    flush();
-    server_.sendContent("");
-  }
-
- private:
-  WebServer& server_;
-  char buffer_[1024];
-  size_t used_ = 0;
-};
-
-// True if key is one of the comma-separated names in list.
-bool listContainsKey(const String& list, const char* key) {
-  const size_t keyLen = strlen(key);
-  for (const char* p = list.c_str(); *p;) {
-    const char* comma = strchr(p, ',');
-    const size_t len = comma ? static_cast<size_t>(comma - p) : strlen(p);
-    if (len == keyLen && strncmp(p, key, len) == 0) return true;
-    if (!comma) break;
-    p = comma + 1;
   }
   return false;
 }
@@ -250,125 +161,9 @@ bool listContainsKey(const String& list, const char* key) {
 // - HomePageHtml (from html/HomePage.html)
 // - FilesPageHeaderHtml (from html/FilesPageHeader.html)
 // - FilesPageFooterHtml (from html/FilesPageFooter.html)
-CrossPointWebServer::CrossPointWebServer() {}
+CrossPointWebServer::CrossPointWebServer(Surface surface) : surface(surface) {}
 
 CrossPointWebServer::~CrossPointWebServer() { stop(); }
-
-// One handler for every route. Each WebServer::on() call allocates a handler
-// object and a copy of its path; this table stays in flash instead. Matching
-// is the same as on(): exact path and method. Unlike on(), a non-multipart
-// body is not passed to the upload function, which reads server->upload()
-// and would dereference null; it is read like any other POST body.
-class CrossPointWebServer::RouteHandler final : public RequestHandler {
- public:
-  explicit RouteHandler(CrossPointWebServer& owner) : owner_(owner) {}
-
-  bool canHandle(WebServer&, const HTTPMethod method, const String& uri) override {
-    return find(method, uri) != nullptr;
-  }
-  bool canUpload(WebServer&, const String& uri) override {
-    const Route* route = find(HTTP_POST, uri);
-    return route && route->upload;
-  }
-  bool handle(WebServer&, const HTTPMethod method, const String& uri) override {
-    const Route* route = find(method, uri);
-    if (!route) return false;
-    route->handle(owner_);
-    return true;
-  }
-  void upload(WebServer&, const String& uri, HTTPUpload&) override {
-    const Route* route = find(HTTP_POST, uri);
-    if (route && route->upload) route->upload(owner_);
-  }
-
- private:
-  using Action = void (*)(CrossPointWebServer&);
-  struct Route {
-    const char* path;
-    HTTPMethod method;
-    Action handle;
-    Action upload;  // Multipart file parts, or nullptr
-  };
-
-  static const Route* find(const HTTPMethod method, const String& uri) {
-    using S = CrossPointWebServer;
-    static constexpr Route ROUTES[] = {
-        {"/", HTTP_GET, [](S& s) { s.handleRoot(); }, nullptr},
-        {"/files", HTTP_GET, [](S& s) { s.handleFileList(); }, nullptr},
-        {"/js/jszip.min.js", HTTP_GET, [](S& s) { s.handleJszip(); }, nullptr},
-        {"/js/epub-optimizer.js", HTTP_GET,
-         [](S& s) {
-           sendStaticContent(s.server.get(), epub_optimizerJs, sizeof(epub_optimizerJs), epub_optimizerJsETag,
-                             "application/javascript");
-         },
-         nullptr},
-        {"/js/plugin-host.js", HTTP_GET,
-         [](S& s) {
-           sendStaticContent(s.server.get(), plugin_hostJs, sizeof(plugin_hostJs), plugin_hostJsETag,
-                             "application/javascript");
-         },
-         nullptr},
-        {"/assets/web.css", HTTP_GET,
-         [](S& s) { sendStaticContent(s.server.get(), webCss, sizeof(webCss), webCssETag, "text/css"); }, nullptr},
-        {"/assets/icons.svg", HTTP_GET,
-         [](S& s) { sendStaticContent(s.server.get(), iconsSvg, sizeof(iconsSvg), iconsSvgETag, "image/svg+xml"); },
-         nullptr},
-        {"/assets/crosspoint-icon.svg", HTTP_GET,
-         [](S& s) {
-           sendStaticContent(s.server.get(), crosspoint_iconSvg, sizeof(crosspoint_iconSvg), crosspoint_iconSvgETag,
-                             "image/svg+xml");
-         },
-         nullptr},
-
-        {"/api/status", HTTP_GET, [](S& s) { s.handleStatus(); }, nullptr},
-        {"/api/files", HTTP_GET, [](S& s) { s.handleFileListData(); }, nullptr},
-        {"/download", HTTP_GET, [](S& s) { s.handleDownload(); }, nullptr},
-        {"/upload", HTTP_POST, [](S& s) { s.handleUploadPost(s.upload); }, [](S& s) { s.handleUpload(s.upload); }},
-        {"/mkdir", HTTP_POST, [](S& s) { s.handleCreateFolder(); }, nullptr},
-        {"/rename", HTTP_POST, [](S& s) { s.handleRename(); }, nullptr},
-        {"/move", HTTP_POST, [](S& s) { s.handleMove(); }, nullptr},
-        {"/delete", HTTP_POST, [](S& s) { s.handleDelete(); }, nullptr},
-
-        {"/settings", HTTP_GET, [](S& s) { s.handleSettingsPage(); }, nullptr},
-        {"/api/settings", HTTP_GET, [](S& s) { s.handleGetSettings(); }, nullptr},
-        {"/api/settings", HTTP_POST, [](S& s) { s.handlePostSettings(); }, nullptr},
-
-        {"/fonts", HTTP_GET, [](S& s) { s.handleFontsPage(); }, nullptr},
-        {"/api/fonts", HTTP_GET, [](S& s) { s.handleFontList(); }, nullptr},
-        {"/api/fonts/upload", HTTP_POST, [](S& s) { s.handleFontUpload(); }, [](S& s) { s.handleFontUploadData(); }},
-        {"/api/fonts/delete", HTTP_POST, [](S& s) { s.handleFontDelete(); }, nullptr},
-
-        {"/api/opds", HTTP_GET, [](S& s) { s.handleGetOpdsServers(); }, nullptr},
-        {"/api/opds", HTTP_POST, [](S& s) { s.handlePostOpdsServer(); }, nullptr},
-        {"/api/opds/delete", HTTP_POST, [](S& s) { s.handleDeleteOpdsServer(); }, nullptr},
-
-        // Browser-side plugins (JS on the SD card) + their generic capabilities.
-        {"/api/plugins", HTTP_GET, [](S& s) { s.handlePluginList(); }, nullptr},
-        {"/plugin", HTTP_GET, [](S& s) { s.handlePluginFile(); }, nullptr},
-        {"/plugins", HTTP_GET, [](S& s) { s.handlePluginsPage(); }, nullptr},
-        {"/plugins-run", HTTP_GET, [](S& s) { s.handlePluginRunnerPage(); }, nullptr},
-        {"/api/plugin-jobs", HTTP_POST, [](S& s) { s.handlePluginJobSubmit(); }, nullptr},
-        {"/api/plugin-jobs/claim", HTTP_GET, [](S& s) { s.handlePluginJobClaim(); }, nullptr},
-        {"/api/plugin-jobs/complete", HTTP_POST, [](S& s) { s.handlePluginJobComplete(); }, nullptr},
-        {"/api/plugin-jobs/status", HTTP_GET, [](S& s) { s.handlePluginJobStatus(); }, nullptr},
-        {"/api/relay", HTTP_POST, [](S& s) { s.handleRelay(); }, nullptr},
-        {"/api/crypto", HTTP_POST, [](S& s) { s.handleCrypto(); }, nullptr},
-        {"/api/fetch", HTTP_POST, [](S& s) { s.handleFetch(); }, nullptr},
-        {"/api/book-key", HTTP_POST, [](S& s) { s.handleBookKey(); }, nullptr},
-        {"/api/plugin-fs", HTTP_POST, [](S& s) { s.handlePluginFs(); }, [](S& s) { s.handlePluginFsUpload(); }},
-
-        {"/api/wifi", HTTP_GET, [](S& s) { s.handleGetWifiNetworks(); }, nullptr},
-        {"/api/wifi", HTTP_POST, [](S& s) { s.handlePostWifiNetwork(); }, nullptr},
-        {"/api/wifi/delete", HTTP_POST, [](S& s) { s.handleDeleteWifiNetwork(); }, nullptr},
-    };
-    for (const Route& route : ROUTES) {
-      if (route.method == method && uri == route.path) return &route;
-    }
-    return nullptr;
-  }
-
-  CrossPointWebServer& owner_;
-};
 
 void CrossPointWebServer::begin() {
   if (running) {
@@ -415,51 +210,167 @@ void CrossPointWebServer::begin() {
   // Add Access-Control-Allow-* headers to every response so web-based clients
   // and PWAs on other origins can use the HTTP API. Preflight OPTIONS requests
   // are answered in handleNotFound().
-  server->enableCORS(true);
-
-  // Redirect captive-portal checks to the home page so the OS opens it (see
-  // https://en.wikipedia.org/wiki/Captive_portal#Detection). This runs before
-  // the handlers because WebDAV claims every GET. Checks are GET or HEAD; other
-  // methods are never redirected, as their body is already handled by then.
-  // Host comes from the collected headers: hostHeader() keeps the last value.
-  if (apMode) {
-    server->addMiddleware([](WebServer& s, Middleware::Callback next) {
-      const bool check = s.method() == HTTP_GET || s.method() == HTTP_HEAD;
-      if (!check || !UrlUtils::isForeignHost(s.header("Host").c_str())) return next();
-      s.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
-      s.send(302, "text/plain", "");
-      return true;
-    });
-  }
+  // NOT on the Developer Mode surface. This core's enableCORS sends
+  // Access-Control-Allow-Origin/Methods/Headers: *, which lets any page the
+  // user happens to visit both call these routes AND READ THE REPLIES. That
+  // turns a six-digit code into something grindable from a drive-by tab
+  // rather than from the LAN, and the reply to a successful guess hands over
+  // the token. The reader's own web UI is a browser page and needs CORS; the
+  // dev API's client is curl and does not.
+  // Full only. WallpapersOnly serves its own page to its own origin, so CORS
+  // would only widen who may read the replies, and DeveloperOnly deliberately
+  // withholds it (see below).
+  if (isFull()) server->enableCORS(true);
 
   // Setup routes
-  LOG_DBG("WEB", "Setting up routes...");
-  server->addHandler(new RouteHandler(*this));  // Deleted with the WebServer (stop() resets it)
+  LOG_DBG("WEB", "Setting up routes (%s)...",
+          isFull() ? "full" : (isDev() ? "developer mode only" : "wallpapers only"));
+  if (isFull()) {
+    server->on("/", HTTP_GET, [this] { handleRoot(); });
+    server->on("/files", HTTP_GET, [this] { handleFileList(); });
+    server->on("/js/jszip.min.js", HTTP_GET, [this] { handleJszip(); });
+
+    server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
+    server->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
+    server->on("/download", HTTP_GET, [this] { handleDownload(); });
+
+    // Upload endpoint with special handling for multipart form data
+    server->on("/upload", HTTP_POST, [this] { handleUploadPost(upload); }, [this] { handleUpload(upload); });
+
+    // Create folder endpoint
+    server->on("/mkdir", HTTP_POST, [this] { handleCreateFolder(); });
+
+    // Rename file endpoint
+    server->on("/rename", HTTP_POST, [this] { handleRename(); });
+
+    // Move file endpoint
+    server->on("/move", HTTP_POST, [this] { handleMove(); });
+
+    // Delete file/folder endpoint
+    server->on("/delete", HTTP_POST, [this] { handleDelete(); });
+
+    // Settings endpoints
+    server->on("/settings", HTTP_GET, [this] { handleSettingsPage(); });
+    server->on("/api/settings", HTTP_GET, [this] { handleGetSettings(); });
+    server->on("/api/settings", HTTP_POST, [this] { handlePostSettings(); });
+
+    // Font management endpoints
+    server->on("/fonts", HTTP_GET, [this] { handleFontsPage(); });
+    server->on("/api/fonts", HTTP_GET, [this] { handleFontList(); });
+    server->on("/api/fonts/upload", HTTP_POST, [this] { handleFontUpload(); }, [this] { handleFontUploadData(); });
+    server->on("/api/fonts/delete", HTTP_POST, [this] { handleFontDelete(); });
+
+    // OPDS server endpoints
+    server->on("/api/opds", HTTP_GET, [this] { handleGetOpdsServers(); });
+    server->on("/api/opds", HTTP_POST, [this] { handlePostOpdsServer(); });
+    server->on("/api/opds/delete", HTTP_POST, [this] { handleDeleteOpdsServer(); });
+
+    // Browser-side plugins (JS on the SD card) + their generic capabilities.
+    server->on("/api/plugins", HTTP_GET, [this] { handlePluginList(); });
+    server->on("/plugin", HTTP_GET, [this] { handlePluginFile(); });
+    server->on("/plugins-run", HTTP_GET, [this] { handlePluginRunnerPage(); });
+    server->on("/api/plugin-jobs", HTTP_POST, [this] { handlePluginJobSubmit(); });
+    server->on("/api/plugin-jobs/claim", HTTP_GET, [this] { handlePluginJobClaim(); });
+    server->on("/api/plugin-jobs/complete", HTTP_POST, [this] { handlePluginJobComplete(); });
+    server->on("/api/plugin-jobs/status", HTTP_GET, [this] { handlePluginJobStatus(); });
+    server->on("/api/relay", HTTP_POST, [this] { handleRelay(); });
+    server->on("/api/crypto", HTTP_POST, [this] { handleCrypto(); });
+    server->on("/api/fetch", HTTP_POST, [this] { handleFetch(); });
+    server->on("/api/book-key", HTTP_POST, [this] { handleBookKey(); });
+    server->on("/api/plugin-fs", HTTP_POST, [this] { handlePluginFs(); }, [this] { handlePluginFsUpload(); });
+
+    // Wi-Fi credential endpoints
+    server->on("/api/wifi", HTTP_GET, [this] { handleGetWifiNetworks(); });
+    server->on("/api/wifi", HTTP_POST, [this] { handlePostWifiNetwork(); });
+    server->on("/api/wifi/delete", HTTP_POST, [this] { handleDeleteWifiNetwork(); });
+  }  // isFull()
+
+  if (isWallpapers()) {
+    server->on("/w", HTTP_GET, [this] { handleWallpaperPage(); });
+    server->on("/js/wallconvert.js", HTTP_GET, [this] { handleWallpaperScript(); });
+    // HTTP_PUT for the same structural reason /api/dev/upload is: this core
+    // hands ONE callback to both the multipart and the raw paths with nothing
+    // to tell them apart, and calling server->upload() in raw mode dereferences
+    // a null _currentUpload and reboots. PUT makes canUpload() unreachable, so
+    // only the raw path can ever fire.
+    server->on("/w/upload", HTTP_PUT, [this] { handleWallpaperUpload(); }, [this] { handleWallpaperUploadData(); });
+  }
+
+  if (isNotes()) {
+    server->on("/n", HTTP_GET, [this] { handleNotesPage(); });
+    server->on("/n/text", HTTP_GET, [this] { handleNotesText(); });
+    // PUT rather than POST for the same reason /w/upload is: this core hands
+    // one callback to both the multipart and the raw paths with nothing to tell
+    // them apart. A note is small enough to arrive as a plain body, so there is
+    // no raw handler at all here -- server->arg("plain") is the whole read.
+    server->on("/n/text", HTTP_PUT, [this] { handleNotesSave(); });
+  }
+
+  // The developer surface. Present for Full and DeveloperOnly and DELIBERATELY
+  // NOT for WallpapersOnly or NotesOnly: these routes flash firmware, and the whole point of
+  // that surface is that its address is printed in a QR code for anyone in the
+  // room to scan. "Always present" was true when there were two surfaces; a
+  // third one that quietly inherited a flashing API would be the worst kind of
+  // default. /api/status carries no secrets and is how a script finds a device
+  // before it has a token, so it rides along with them.
+  if (isFull() || isDev()) {
+    server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
+    server->on("/api/dev/pair", HTTP_POST, [this] { handleDevPair(); });
+    server->on("/api/dev/flash", HTTP_POST, [this] { handleDevFlash(); });
+    // HTTP_PUT, and that is load-bearing rather than taste. This core's
+    // FunctionRequestHandler hands the SAME callback to both the upload path and
+    // the raw path, with nothing passed in to tell them apart -- and calling
+    // server->upload() while the server is in raw mode dereferences a null
+    // _currentUpload and reboots the device. Registering as PUT makes canUpload()
+    // structurally unreachable (it requires HTTP_POST), so only the raw path can
+    // ever fire and there is one mode to write for instead of two to distinguish.
+    server->on("/api/dev/upload", HTTP_PUT, [this] { handleDevUpload(); }, [this] { handleDevUploadData(); });
+    server->on("/api/dev/disable", HTTP_POST, [this] { handleDevDisable(); });
+    server->on("/api/dev/crash", HTTP_GET, [this] { handleDevCrash(); });
+    server->on("/api/dev/log", HTTP_GET, [this] { handleDevLog(); });
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+    // Driving the device, over the transport that needs no cable. Gated on the
+    // same flag as the injector itself, so a release build carries neither the
+    // routes nor the per-frame input overlay they schedule onto.
+    server->on("/api/dev/input", HTTP_POST, [this] { handleDevInput(); });
+    server->on("/api/dev/screen", HTTP_GET, [this] { handleDevScreen(); });
+    server->on("/api/dev/serial", HTTP_GET, [this] { handleDevSerial(); });
+#endif
+
+  }  // isFull() || isDev()
+
   server->onNotFound([this] { handleNotFound(); });
   LOG_DBG("WEB", "[MEM] Free heap after route setup: %d bytes", ESP.getFreeHeap());
 
   // Collect WebDAV headers and register handler
-  // If-None-Match is collected so static pages and plugin files can answer conditional GETs with 304,
-  // and Host for the captive-portal check
+  // X-Dev-Token rides along here: Arduino's WebServer only retains headers it
+  // was told to collect, so without this hasHeader() is always false and every
+  // paired request looks unpaired. If-None-Match is collected so the
+  // static-page handlers can answer conditional GETs with 304.
   const char* collectedHeaders[] = {"Depth",      "Destination", "Overwrite",     "If",
-                                    "Lock-Token", "Timeout",     "If-None-Match", "Host"};
+                                    "Lock-Token", "Timeout",     "If-None-Match", "X-Dev-Token"};
   server->collectHeaders(collectedHeaders, 8);
-  server->addHandler(new WebDAVHandler());  // Note: WebDAVHandler will be deleted by WebServer when server is stopped
-  LOG_DBG("WEB", "WebDAV handler initialized");
+  if (isFull()) {
+    server->addHandler(new WebDAVHandler());  // deleted by WebServer when the server is stopped
+    LOG_DBG("WEB", "WebDAV handler initialized");
+  }
 
   server->begin();
 
-  // Start WebSocket server for fast binary uploads
-  LOG_DBG("WEB", "Starting WebSocket server on port %d...", wsPort);
-  wsServer.reset(new WebSocketsServer(wsPort));
-  std::fill(std::begin(wsLastActivity), std::end(wsLastActivity), 0);
-  wsInstance = const_cast<CrossPointWebServer*>(this);
-  wsServer->begin();
-  wsServer->onEvent(wsEventCallback);
-  LOG_DBG("WEB", "WebSocket server started");
+  if (isFull()) {
+    // Fast binary uploads for the file manager. Dev mode uploads over plain
+    // HTTP instead, which is one fewer listening port for the surface that
+    // stays up the longest.
+    LOG_DBG("WEB", "Starting WebSocket server on port %d...", wsPort);
+    wsServer.reset(new WebSocketsServer(wsPort));
+    wsInstance = const_cast<CrossPointWebServer*>(this);
+    wsServer->begin();
+    wsServer->onEvent(wsEventCallback);
+    LOG_DBG("WEB", "WebSocket server started");
+  }
 
-  openDiscoverySocket();
-  LOG_DBG("WEB", "Discovery UDP %s on port %d", discoverySocket >= 0 ? "enabled" : "failed", LOCAL_UDP_PORT);
+  udpActive = udp.begin(LOCAL_UDP_PORT);
+  LOG_DBG("WEB", "Discovery UDP %s on port %d", udpActive ? "enabled" : "failed", LOCAL_UDP_PORT);
 
   // Do not subscribe the serving task to the task watchdog. Arduino WebServer
   // permits five-second client and ACK waits, which can consume the entire
@@ -483,7 +394,7 @@ void CrossPointWebServer::suspendTransferServices() {
     wsServer->close();
     wsServer.reset();
   }
-  closeDiscoverySocket();
+  if (udpActive) udp.stop();
   LOG_DBG("WEB", "Transfer services suspended, heap %u, max block %u", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
 }
@@ -494,14 +405,13 @@ void CrossPointWebServer::resumeTransferServices() {
     auto* ws = new (std::nothrow) WebSocketsServer(wsPort);
     if (ws) {
       wsServer.reset(ws);
-      std::fill(std::begin(wsLastActivity), std::end(wsLastActivity), 0);
       wsServer->begin();
       wsServer->onEvent(wsEventCallback);
     } else {
       LOG_ERR("WEB", "OOM: WebSocket server restart");
     }
   }
-  openDiscoverySocket();
+  if (udpActive) udpActive = udp.begin(LOCAL_UDP_PORT);
   LOG_DBG("WEB", "Transfer services resumed, heap %u, max block %u", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
 }
@@ -554,7 +464,10 @@ void CrossPointWebServer::stop() {
     LOG_DBG("WEB", "WebSocket server stopped");
   }
 
-  closeDiscoverySocket();
+  if (udpActive) {
+    udp.stop();
+    udpActive = false;
+  }
 
   // Brief delay to allow any in-flight handleClient() calls to complete
   delay(20);
@@ -575,8 +488,6 @@ void CrossPointWebServer::stop() {
 }
 
 void CrossPointWebServer::handleClient() {
-  static unsigned long lastDebugPrint = 0;
-
   // Check running flag FIRST before accessing server
   if (!running) {
     return;
@@ -588,11 +499,13 @@ void CrossPointWebServer::handleClient() {
     return;
   }
 
-  // Print debug every 10 seconds to confirm handleClient is being called
-  if (millis() - lastDebugPrint > 10000) {
-    LOG_DBG("WEB", "handleClient active, server running on port %d", port);
-    lastDebugPrint = millis();
-  }
+  // No heartbeat. It fired every 10 seconds and said only that a loop was
+  // still looping -- and the RTC log ring is SIXTEEN lines, so it flushed the
+  // ring every 160 seconds. That made /api/dev/log and /api/dev/crash useless
+  // for anything that happened more than two and a half minutes ago: a real
+  // diagnosis of a wedged cable was overwritten by a heartbeat while it was
+  // still being read. A log line that only says "still running" is worth less
+  // than the sixteenth of the ring it costs.
 
   server->handleClient();
   // WebServer otherwise keeps the last request's argument strings allocated
@@ -603,54 +516,33 @@ void CrossPointWebServer::handleClient() {
   // Handle WebSocket events
   if (wsServer) {
     wsServer->loop();
-    closeIdleWsClients(*wsServer);
   }
 
-  answerDiscovery();
-}
-
-// Discovery uses a plain socket: NetworkUDP keeps a 1,460-byte send buffer
-// while it is open, for a reply of a few dozen bytes.
-void CrossPointWebServer::openDiscoverySocket() {
-  if (discoverySocket >= 0) return;
-  const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (fd < 0) return;
-  sockaddr_in addr = {};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(LOCAL_UDP_PORT);
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0 ||
-      fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) < 0) {
-    close(fd);
-    return;
+  // Respond to discovery broadcasts
+  if (udpActive) {
+    int packetSize = udp.parsePacket();
+    if (packetSize > 0) {
+      char buffer[16];
+      int len = udp.read(buffer, sizeof(buffer) - 1);
+      if (len > 0) {
+        buffer[len] = '\0';
+        if (strcmp(buffer, "hello") == 0) {
+          String hostname = WiFi.getHostname();
+          if (hostname.isEmpty()) {
+            hostname = "crossnext";
+          }
+          // A discovery handshake, not a label. Two things match this leading
+          // token to recognise the device: upstream's crosspoint_reader Calibre
+          // plugin, and the fork's OWN scripts_local/wifi-flash.sh. Renaming it
+          // would break wireless flashing, which is the surprising half.
+          String message = "crosspoint (on " + hostname + ");" + String(wsPort);
+          udp.beginPacket(udp.remoteIP(), udp.remotePort());
+          udp.write(reinterpret_cast<const uint8_t*>(message.c_str()), message.length());
+          udp.endPacket();
+        }
+      }
+    }
   }
-  discoverySocket = fd;
-}
-
-void CrossPointWebServer::closeDiscoverySocket() {
-  if (discoverySocket < 0) return;
-  close(discoverySocket);
-  discoverySocket = -1;
-}
-
-// Answers a "hello" broadcast with the device name and WebSocket port.
-void CrossPointWebServer::answerDiscovery() const {
-  if (discoverySocket < 0) return;
-  char buffer[16];
-  sockaddr_in from = {};
-  socklen_t fromLen = sizeof(from);
-  const int len =
-      recvfrom(discoverySocket, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
-  if (len <= 0) return;
-  buffer[len] = '\0';
-  if (strcmp(buffer, "hello") != 0) return;
-  const char* hostname = WiFi.getHostname();
-  char message[96];
-  const int messageLen = snprintf(message, sizeof(message), "crosspoint (on %s);%u",
-                                  hostname && hostname[0] ? hostname : "crosspoint", static_cast<unsigned>(wsPort));
-  if (messageLen <= 0) return;
-  sendto(discoverySocket, message, std::min(static_cast<size_t>(messageLen), sizeof(message) - 1), 0,
-         reinterpret_cast<sockaddr*>(&from), fromLen);
 }
 
 CrossPointWebServer::WsUploadStatus CrossPointWebServer::getWsUploadStatus() const {
@@ -667,12 +559,6 @@ CrossPointWebServer::WsUploadStatus CrossPointWebServer::getWsUploadStatus() con
 
 static void sendStaticContent(WebServer* server, const char* data, size_t len, const char* etag,
                               const char* contentType) {
-  if (strcmp(contentType, "text/html") == 0) {
-    // Read by the page header to hide the Plugins link; sent on 304 too, so it
-    // stays current on every navigation without an extra request.
-    server->sendHeader("Set-Cookie", SETTINGS.pluginsEnabled ? "cpPlugins=1; Path=/; SameSite=Strict"
-                                                             : "cpPlugins=0; Path=/; SameSite=Strict");
-  }
   // Content is baked into flash at build time, so the ETag is stable for the
   // lifetime of a firmware image. Honor If-None-Match with a 304 so browsers
   // reuse their cache instead of re-downloading on every navigation.
@@ -708,6 +594,15 @@ void CrossPointWebServer::handleNotFound() const {
     return;
   }
 
+  // in AP mode, redirect unmatched browser/captive-portal requests to "/" so the OS auto-opens the browser
+  // API requests (/api/*) still return 404 so XHR errors surface correctly
+  // see https://en.wikipedia.org/wiki/Captive_portal#Detection
+  if (apMode && !server->uri().startsWith("/api/")) {
+    server->sendHeader("Location", "/", true);
+    server->send(302, "text/plain", "");
+    return;
+  }
+
   String message = "404 Not Found\n\n";
   message += "URI: " + server->uri() + "\n";
   server->send(404, "text/plain", message);
@@ -719,9 +614,6 @@ void CrossPointWebServer::handleStatus() const {
 
   JsonDocument doc;
   doc["version"] = CROSSPOINT_VERSION;
-  doc["firmwareFamily"] = firmwareidentity::FAMILY;
-  doc["pluginApi"] = firmwareidentity::PLUGIN_API_VERSION;
-  doc["pluginCapabilities"] = firmwareidentity::PLUGIN_CAPABILITIES;
   doc["ip"] = ipAddr;
   doc["mode"] = apMode ? "AP" : "STA";
   doc["rssi"] = apMode ? 0 : WiFi.RSSI();
@@ -801,7 +693,7 @@ void CrossPointWebServer::scanFiles(const char* path, const std::function<void(F
 
     // Check against explicitly hidden items list
     if (!shouldHide) {
-      for (const auto* item : FsHelpers::HIDDEN_ITEMS) {
+      for (const auto* item : HIDDEN_ITEMS) {
         if (fileName.equals(item)) {
           shouldHide = true;
           break;
@@ -848,27 +740,36 @@ void CrossPointWebServer::handleFileListData() const {
 
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
-  ChunkedReply reply(*server);
-  reply.write("[");
+  server->sendContent("[");
+  char output[512];
+  constexpr size_t outputSize = sizeof(output);
   bool seenFirst = false;
   JsonDocument doc;
 
-  scanFiles(currentPath.c_str(), [&reply, &doc, &seenFirst](const FileInfo& info) {
+  scanFiles(currentPath.c_str(), [this, &output, &doc, seenFirst](const FileInfo& info) mutable {
     doc.clear();
     doc["name"] = info.name;
     doc["size"] = info.size;
     doc["isDirectory"] = info.isDirectory;
     doc["isEpub"] = info.isEpub;
-    if (doc.overflowed()) {
-      LOG_ERR("WEB", "OOM: file entry JSON for %s", info.name.c_str());
+
+    const size_t written = serializeJson(doc, output, outputSize);
+    if (written >= outputSize) {
+      // JSON output truncated; skip this entry to avoid sending malformed JSON
+      LOG_DBG("WEB", "Skipping file entry with oversized JSON for name: %s", info.name.c_str());
       return;
     }
-    if (seenFirst) reply.write(',');
-    seenFirst = true;
-    serializeJson(doc, reply);
+
+    if (seenFirst) {
+      server->sendContent(",");
+    } else {
+      seenFirst = true;
+    }
+    server->sendContent(output);
   });
-  reply.write("]");
-  reply.end();
+  server->sendContent("]");
+  // End of streamed response, empty chunk to signal client
+  server->sendContent("");
   LOG_DBG("WEB", "Served file listing page for path: %s", currentPath.c_str());
 }
 
@@ -918,7 +819,7 @@ void CrossPointWebServer::handleDownload() const {
     server->send(403, "text/plain", "Cannot access system files");
     return;
   }
-  for (const auto* item : FsHelpers::HIDDEN_ITEMS) {
+  for (const auto* item : HIDDEN_ITEMS) {
     if (itemName.equals(item)) {
       server->send(403, "text/plain", "Cannot access protected items");
       return;
@@ -983,22 +884,13 @@ static bool flushUploadBuffer(CrossPointWebServer::UploadState& state) {
   return true;
 }
 
-static String uploadDestPath(const CrossPointWebServer::UploadState& state) {
+// Drop a partially written upload so a truncated book never lands in the library.
+// The file is new: uploads refuse to overwrite an existing name.
+static void removeUploadedFile(const CrossPointWebServer::UploadState& state) {
   String filePath = state.path;
   if (!filePath.endsWith("/")) filePath += "/";
   filePath += state.fileName;
-  return filePath;
-}
-
-// The path being written: the destination itself, or "<dest>.part" while overwriting.
-static String uploadWritePath(const CrossPointWebServer::UploadState& state) {
-  return state.staged ? uploadDestPath(state) + ".part" : uploadDestPath(state);
-}
-
-// Drop a partially written upload so a truncated book never lands in the library.
-// An overwritten file is untouched: only its staged copy is removed.
-static void removeUploadedFile(const CrossPointWebServer::UploadState& state) {
-  Storage.remove(uploadWritePath(state).c_str());
+  Storage.remove(filePath.c_str());
 }
 
 void CrossPointWebServer::handleUpload(UploadState& state) const {
@@ -1023,7 +915,6 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
     state.size = 0;
     state.success = false;
     state.error = "";
-    state.staged = false;
     uploadStartTime = millis();
     lastLoggedSize = 0;
     state.bufferPos = 0;
@@ -1060,20 +951,9 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
     // Check if file already exists - SD operations can be slow
     resetTaskWatchdogIfSubscribed();
     if (Storage.exists(filePath.c_str())) {
-      const String overwrite = server->arg("overwrite");
-      if (overwrite != "1" && overwrite != "true") {
-        state.error = "File already exists: " + state.fileName;
-        LOG_DBG("WEB", "[UPLOAD] Collision: %s", filePath.c_str());
-        return;
-      }
-      HalFile existing = Storage.open(filePath.c_str());
-      if (existing && existing.isDirectory()) {
-        state.error = "A folder with this name already exists: " + state.fileName;
-        LOG_DBG("WEB", "[UPLOAD] Folder collision: %s", filePath.c_str());
-        return;
-      }
-      existing.close();
-      state.staged = true;
+      state.error = "File already exists: " + state.fileName;
+      LOG_DBG("WEB", "[UPLOAD] Collision: %s", filePath.c_str());
+      return;
     }
 
     // The buffer spans upload callbacks; keep it off the task stack and release it at the end.
@@ -1086,15 +966,15 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
 
     // Open file for writing - this can be slow due to FAT cluster allocation
     resetTaskWatchdogIfSubscribed();
-    if (!Storage.openFileForWrite("WEB", uploadWritePath(state), state.file)) {
+    if (!Storage.openFileForWrite("WEB", filePath, state.file)) {
       state.error = "Failed to create file on SD card";
-      LOG_DBG("WEB", "[UPLOAD] FAILED to create file: %s", uploadWritePath(state).c_str());
+      LOG_DBG("WEB", "[UPLOAD] FAILED to create file: %s", filePath.c_str());
       state.buffer.reset();
       return;
     }
     resetTaskWatchdogIfSubscribed();
 
-    LOG_DBG("WEB", "[UPLOAD] File created successfully: %s", uploadWritePath(state).c_str());
+    LOG_DBG("WEB", "[UPLOAD] File created successfully: %s", filePath.c_str());
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (dropUploadIfCancelled()) return;
     if (state.file && state.error.isEmpty()) {
@@ -1142,27 +1022,8 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
       if (!flushUploadBuffer(state)) {
         state.error = "Failed to write final data to SD card";
       }
-      // close() writes the final size: a failed close must not replace the original.
-      if (!state.file.close() && state.error.isEmpty()) state.error = "Failed to write final data to SD card";
-      bool keepStaged = false;
-      if (state.error.isEmpty() && state.staged) {
-        resetTaskWatchdogIfSubscribed();  // removing a large original walks its cluster chain
-        const String dest = uploadDestPath(state);
-        if (!Storage.replaceFile(uploadWritePath(state).c_str(), dest.c_str())) {
-          LOG_ERR("WEB", "[UPLOAD] Replace failed: %s", dest.c_str());
-          // replaceFile removes the original before the rename: if it is gone,
-          // the staged copy is the only one left, so keep it.
-          keepStaged = !Storage.exists(dest.c_str());
-          state.error = keepStaged ? "Replace failed; the new file is kept as " + state.fileName + ".part"
-                                   : "Failed to replace the existing file";
-          if (keepStaged) {
-            // The original is gone: drop its cache and Library entry.
-            clearBookCache(dest.c_str());
-            if (library::isLibraryBookFile(dest.c_str())) library::markLibraryIndexDirty();
-          }
-        }
-      }
-      if (!state.error.isEmpty() && !keepStaged) removeUploadedFile(state);
+      state.file.close();
+      if (!state.error.isEmpty()) removeUploadedFile(state);
 
       if (state.error.isEmpty()) {
         state.success = true;
@@ -1179,7 +1040,7 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
         if (!filePath.endsWith("/")) filePath += "/";
         filePath += state.fileName;
         clearBookCache(filePath.c_str());
-        if (library::isLibraryBookFile(filePath.c_str())) library::markLibraryIndexDirty();
+        if (isLibraryBookFile(state.fileName)) library::markLibraryIndexDirty();
       }
     }
     state.buffer.reset();
@@ -1202,9 +1063,6 @@ void CrossPointWebServer::handleUploadPost(UploadState& state) const {
     const String error = state.error.isEmpty() ? "Unknown error during upload" : state.error;
     server->send(400, "text/plain", error);
   }
-  // A later POST without a file part must not repeat this result.
-  state.success = false;
-  state.error = "";
 }
 
 void CrossPointWebServer::handleCreateFolder() const {
@@ -1500,16 +1358,16 @@ void CrossPointWebServer::handleDelete() const {
     // Security check: prevent deletion of protected items
     const String itemName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
 
-    // Credential stores are protected. Hidden (dot-named) items can be deleted.
-    if (protectedpaths::isSensitivePath(itemPath.c_str())) {
-      failedItems += itemPath + " (protected file); ";
+    // Hidden/system files and credential stores are protected
+    if (itemName.startsWith(".") || protectedpaths::isSensitivePath(itemPath.c_str())) {
+      failedItems += itemPath + " (hidden/system file); ";
       allSuccess = false;
       continue;
     }
 
     // Check against explicitly protected items
     bool isProtected = false;
-    for (const auto* item : FsHelpers::HIDDEN_ITEMS) {
+    for (const auto* item : HIDDEN_ITEMS) {
       if (itemName.equals(item)) {
         isProtected = true;
         break;
@@ -1573,22 +1431,19 @@ void CrossPointWebServer::handleGetSettings() const {
   // three built-in fonts.
   std::vector<DictionaryEntry> dictionaries;
   DictionaryRegistry::discover(dictionaries);
-  // ?keys=a,b returns only those settings, so a plugin need not read the whole list.
-  const String keys = server->arg("keys");
-  const auto wants = [&keys](const char* key) { return key && (keys.isEmpty() || listContainsKey(keys, key)); };
+  const auto& settings = getSettingsList(&sdFontSystem.registry(), &dictionaries);
 
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
-  ChunkedReply reply(*server);
-  reply.write("[");
+  server->sendContent("[");
 
+  char output[512];
+  constexpr size_t outputSize = sizeof(output);
   bool seenFirst = false;
   JsonDocument doc;
 
-  // One entry at a time: building the whole list first can exhaust the heap
-  // right after a plugin relay.
-  forEachSetting(&sdFontSystem.registry(), &dictionaries, wants, [&](const SettingInfo& s) {
-    if (s.webHidden) return;
+  for (const auto& s : settings) {
+    if (!s.key) continue;  // Skip ACTION-only entries
 
     doc.clear();
     doc["key"] = s.key;
@@ -1604,16 +1459,12 @@ void CrossPointWebServer::handleGetSettings() const {
         break;
       }
       case SettingType::ENUM: {
-        const auto labels = s.enumLabels();
-        const bool toggle = s.enumStringValues.empty() && labels.size() == 2 && labels[0] == StrId::STR_STATE_OFF &&
-                            labels[1] == StrId::STR_STATE_ON;
-        doc["type"] = toggle ? "toggle" : "enum";
+        doc["type"] = "enum";
         if (s.valuePtr) {
           doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
         } else if (s.valueGetter) {
           doc["value"] = static_cast<int>(s.valueGetter());
         }
-        if (toggle) break;
         JsonArray options = doc["options"].to<JsonArray>();
         if (!s.enumStringValues.empty()) {
           for (const auto& opt : s.enumStringValues) {
@@ -1653,23 +1504,27 @@ void CrossPointWebServer::handleGetSettings() const {
         break;
       }
       default:
-        return;
+        continue;
     }
 
-    // A truncated options list would shift option indexes, so skip the entry instead.
-    if (doc.overflowed()) {
-      LOG_ERR("WEB", "OOM: setting JSON for %s", s.key);
-      return;
+    const size_t written = serializeJson(doc, output, outputSize);
+    if (written >= outputSize) {
+      LOG_DBG("WEB", "Skipping oversized setting JSON for: %s", s.key);
+      continue;
     }
-    if (seenFirst) reply.write(',');
-    seenFirst = true;
-    serializeJson(doc, reply);
+
+    if (seenFirst) {
+      server->sendContent(",");
+    } else {
+      seenFirst = true;
+    }
+    server->sendContent(output);
     yield();                          // Yield to allow WiFi and other tasks to process during a slow send
-    resetTaskWatchdogIfSubscribed();  // Reset watchdog: writing a full chunk blocks on the network
-  });
+    resetTaskWatchdogIfSubscribed();  // Reset watchdog: each sendContent() is a blocking network write
+  }
 
-  reply.write("]");
-  reply.end();
+  server->sendContent("]");
+  server->sendContent("");
   LOG_DBG("WEB", "Served settings API");
 }
 
@@ -1693,8 +1548,14 @@ void CrossPointWebServer::handlePostSettings() {
   int applied = 0;
 
   for (const auto& s : settings) {
-    if (!s.key || s.webHidden) continue;
+    if (!s.key) continue;
     if (!doc[s.key].is<JsonVariant>()) continue;
+    if (isLocalOnlySetting(s.key)) {
+      // Not merely ignored -- said out loud, because a silent no-op on a
+      // security-relevant write is indistinguishable from it having worked.
+      LOG_ERR("WEB", "refused a network write to local-only setting '%s'", s.key);
+      continue;
+    }
 
     switch (s.type) {
       case SettingType::TOGGLE: {
@@ -1774,13 +1635,6 @@ void CrossPointWebServer::handleGetOpdsServers() const {
     doc["username"] = servers[i].username;
     // Never expose passwords over the API — only indicate whether one is set
     doc["hasPassword"] = !servers[i].password.empty();
-    // Header values may hold secrets (e.g. an auth proxy token) — same treatment as passwords
-    JsonArray headersArr = doc["headers"].to<JsonArray>();
-    for (const auto& header : servers[i].customHeaders) {
-      JsonObject h = headersArr.add<JsonObject>();
-      h["name"] = header.name;
-      h["hasValue"] = !header.value.empty();
-    }
 
     const size_t written = serializeJson(doc, output, outputSize);
     if (written >= outputSize) continue;
@@ -1820,63 +1674,22 @@ void CrossPointWebServer::handlePostOpdsServer() {
   bool hasPasswordField = doc["password"].is<const char*>() || doc["password"].is<std::string>();
   std::string password = doc["password"] | std::string("");
 
-  // Custom headers: the "headers" array is optional and, when present, is expected to have
-  // one entry per slot. Each entry's "value" key is optional the same way "password" is above
-  // — absent means preserve that slot's existing value on update.
-  bool hasHeadersField = doc["headers"].is<JsonArrayConst>();
-  std::array<std::string, OpdsServer::MAX_CUSTOM_HEADERS> headerNames;
-  std::array<bool, OpdsServer::MAX_CUSTOM_HEADERS> headerValueProvided{};
-  std::array<std::string, OpdsServer::MAX_CUSTOM_HEADERS> headerValues;
-  if (hasHeadersField) {
-    size_t i = 0;
-    for (JsonObjectConst h : doc["headers"].as<JsonArrayConst>()) {
-      if (i >= OpdsServer::MAX_CUSTOM_HEADERS) break;
-      headerNames[i] = h["name"] | std::string("");
-      headerValueProvided[i] = h["value"].is<const char*>() || h["value"].is<std::string>();
-      headerValues[i] = h["value"] | std::string("");
-      i++;
-    }
-  }
-
   if (doc["index"].is<int>()) {
     int idx = doc["index"].as<int>();
     if (idx < 0 || idx >= static_cast<int>(OPDS_STORE.getCount())) {
       server->send(400, "text/plain", "Invalid server index");
       return;
     }
-    const auto* existing = OPDS_STORE.getServer(static_cast<size_t>(idx));
     // Preserve existing password if not explicitly provided
-    if (!hasPasswordField && existing) password = existing->password;
-    opdsServer.password = password;
-
-    for (size_t i = 0; i < OpdsServer::MAX_CUSTOM_HEADERS; i++) {
-      if (hasHeadersField) {
-        opdsServer.customHeaders[i].name = headerNames[i];
-        if (headerNames[i].empty()) {
-          // An empty name clears the slot outright — never leave a stale value
-          // paired with no name, even if the payload omitted "value".
-          opdsServer.customHeaders[i].value.clear();
-        } else {
-          opdsServer.customHeaders[i].value =
-              headerValueProvided[i] ? headerValues[i] : (existing ? existing->customHeaders[i].value : std::string());
-        }
-      } else if (existing) {
-        opdsServer.customHeaders[i] = existing->customHeaders[i];
-      }
+    if (!hasPasswordField) {
+      const auto* existing = OPDS_STORE.getServer(static_cast<size_t>(idx));
+      if (existing) password = existing->password;
     }
-
+    opdsServer.password = password;
     OPDS_STORE.updateServer(static_cast<size_t>(idx), opdsServer);
     LOG_DBG("WEB", "Updated OPDS server at index %d", idx);
   } else {
     opdsServer.password = password;
-
-    if (hasHeadersField) {
-      for (size_t i = 0; i < OpdsServer::MAX_CUSTOM_HEADERS; i++) {
-        opdsServer.customHeaders[i].name = headerNames[i];
-        opdsServer.customHeaders[i].value = headerValues[i];
-      }
-    }
-
     if (!OPDS_STORE.addServer(opdsServer)) {
       server->send(400, "text/plain", "Cannot add server (limit reached)");
       return;
@@ -2105,12 +1918,6 @@ void CrossPointWebServer::sendJson(const JsonDocument& doc) const {
   server->send(200, "application/json", out);
 }
 
-bool CrossPointWebServer::rejectIfPluginsDisabled() const {
-  if (SETTINGS.pluginsEnabled) return false;
-  server->send(403, "text/plain", "plugin system disabled");
-  return true;
-}
-
 // GET /api/plugins -> [{ "name", "title", "mount" }, ...]. Only plugins with a
 // plugin.js are listed (the page loads it); optional manifest.json supplies the
 // title and mount point.
@@ -2158,30 +1965,6 @@ void CrossPointWebServer::handlePluginFile() const {
     return;
   }
 
-  // A content hash, not size and date: without a set clock files can share a
-  // timestamp, and a plugin update can keep the same size.
-  MD5Builder md5;
-  md5.begin();
-  uint8_t chunk[512];
-  int got;
-  while ((got = f.read(chunk, sizeof(chunk))) > 0) {
-    md5.add(chunk, static_cast<size_t>(got));
-    resetTaskWatchdogIfSubscribed();
-  }
-  if (got < 0 || !f.seek(0)) {
-    LOG_ERR("WEB", "Plugin file read failed: %s", path.c_str());
-    server->send(500, "text/plain", "Failed to read file");
-    return;
-  }
-  md5.calculate();
-  const String etag = "\"" + md5.toString() + "\"";
-  // no-cache: the browser keeps the file but revalidates it on every load.
-  server->sendHeader("ETag", etag);
-  server->sendHeader("Cache-Control", "no-cache");
-  if (server->header("If-None-Match") == etag) {
-    server->send(304);
-    return;
-  }
   server->setContentLength(f.size());
   server->send(200, pluginContentType(file), "");
   streamFileToClient(f);
@@ -2192,9 +1975,8 @@ void CrossPointWebServer::handlePluginFile() const {
 //      headers in X-Relay-Headers ([[name, value], ...] JSON, duplicates kept)
 // Lets a plugin make an outbound HTTP(S) call the browser can't (CORS): the
 // device makes it via SecureNet. Sending the body raw avoids escaping it into
-// JSON on the device; CrossPoint.relay() rebuilds {status, headers, body}.
+// JSON on the device; PluginHost.relay() rebuilds {status, headers, body}.
 void CrossPointWebServer::handleRelay() {
-  if (rejectIfPluginsDisabled()) return;
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const String plugin = req["plugin"] | "";
@@ -2218,67 +2000,36 @@ void CrossPointWebServer::handleRelay() {
   LOG_DBG("WEB", "Relay TLS start: heap %u, max block %u: %s", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap(), url.c_str());
 
-  // The body is forwarded as it arrives and never buffered whole; the cap keeps
-  // large files on /api/fetch.
-  static constexpr size_t RELAY_BODY_LIMIT = 64 * 1024;
-  size_t sent = 0;
-  bool chunked = false;
-  bool complete = false;
-  const int status = pluginhttp::requestStream(
-      nullptr, url, method, body, headers,
-      [&](const int upstreamStatus, const pluginhttp::Headers& respHeaders, const long contentLength) {
-        if (contentLength > static_cast<long>(RELAY_BODY_LIMIT)) {
-          LOG_ERR("WEB", "Relay body of %ld bytes is over the %u byte cap", contentLength,
-                  static_cast<unsigned>(RELAY_BODY_LIMIT));
-          return false;
-        }
-        String headersJson;
-        {  // TLS is open: free the document before the header copies below
-          JsonDocument headersDoc;
-          JsonArray headerArray = headersDoc.to<JsonArray>();
-          for (const auto& h : respHeaders) {
-            JsonArray pair = headerArray.add<JsonArray>();
-            pair.add(h.first);
-            pair.add(h.second);
-          }
-          serializeJson(headersDoc, headersJson);
-        }
-        server->sendHeader("X-Relay-Status", String(upstreamStatus));
-        server->sendHeader("X-Relay-Headers", headersJson);
-        chunked = contentLength < 0;
-        server->setContentLength(chunked ? CONTENT_LENGTH_UNKNOWN : static_cast<size_t>(contentLength));
-        server->send(200, "application/octet-stream", "");
-        return true;
-      },
-      [&](const uint8_t* data, const size_t len) {
-        if (len > RELAY_BODY_LIMIT - sent) {
-          LOG_ERR("WEB", "Relay body is over the %u byte cap", static_cast<unsigned>(RELAY_BODY_LIMIT));
-          return false;
-        }
-        server->sendContent(reinterpret_cast<const char*>(data), len);
-        sent += len;
-        return server->client().connected() != 0;
-      },
-      complete,
-      [] {
-        // This task is subscribed to the task WDT for the whole web-server
-        // session: feed it while a slow peer keeps the request waiting.
+  // One bounded body buffer; larger payloads use /api/fetch. This task is
+  // subscribed to the task WDT for the whole web-server session, so feed it
+  // while a slow peer keeps the request waiting.
+  static constexpr size_t RELAY_BODY_LIMIT = 32 * 1024;
+  String respBody;
+  pluginhttp::Headers respHeaders;
+  const int status =
+      pluginhttp::request(nullptr, url, method, body, headers, respBody, RELAY_BODY_LIMIT, &respHeaders, [] {
         resetTaskWatchdogIfSubscribed();
         return false;  // never aborts; only feeds
       });
-  // Nothing sent yet: a transport failure or a body over the cap (the device
-  // log names which).
+  // Transport failure, a truncated body, or one over the cap / out of memory
+  // (the reason is logged by pluginhttp).
   if (status < 0) {
     server->send(502, "application/json", "{\"error\":\"relay failed; large bodies need /api/fetch\"}");
     return;
   }
-  // The 200 is already out. Closing early makes the browser's read fail instead
-  // of returning a short body.
-  if (!complete) {
-    server->client().stop();
-    return;
+
+  JsonDocument headersDoc;
+  JsonArray headerArray = headersDoc.to<JsonArray>();
+  for (const auto& h : respHeaders) {
+    JsonArray pair = headerArray.add<JsonArray>();
+    pair.add(h.first);
+    pair.add(h.second);
   }
-  if (chunked) server->sendContent("");
+  String headersJson;
+  serializeJson(headersDoc, headersJson);
+  server->sendHeader("X-Relay-Status", String(status));
+  server->sendHeader("X-Relay-Headers", headersJson);
+  server->send(200, "application/octet-stream", respBody);
 }
 
 namespace {}  // namespace
@@ -2287,7 +2038,6 @@ namespace {}  // namespace
 // Generic wolfSSL primitives (hash, random, AES, RSA, PKCS#12) a plugin can use.
 // Stateless; keys are base64 in the request/reply.
 void CrossPointWebServer::handleCrypto() {
-  if (rejectIfPluginsDisabled()) return;
   using namespace freeink::content;
   JsonDocument req;
   if (!readJsonBody(req)) return;
@@ -2466,12 +2216,11 @@ void CrossPointWebServer::handleCrypto() {
   sendJson(resp);
 }
 
-// POST /api/fetch {plugin, url, dest, headers?, offset?, maxBytes?, method?, body?}
-//   -> {status, bytes, complete, total?, error?, body?}
+// POST /api/fetch {plugin, url, dest, headers?, offset?, maxBytes?}
+//   -> {status, bytes, complete, total?}
 // Device downloads a URL straight to SD, so a large body never passes through
 // the browser.
 void CrossPointWebServer::handleFetch() {
-  if (rejectIfPluginsDisabled()) return;
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const std::string url = req["url"] | "";
@@ -2482,42 +2231,6 @@ void CrossPointWebServer::handleFetch() {
   if (segmentLimit > FETCH_MAX_SEGMENT_SIZE) segmentLimit = FETCH_MAX_SEGMENT_SIZE;
   if (url.empty() || !protectedpaths::isPluginPath(dest)) {
     server->send(400, "application/json", "{\"error\":\"bad url/dest\"}");
-    return;
-  }
-  const JsonVariantConst methodField = req["method"];
-  if (!methodField.isNull() && !methodField.is<const char*>()) {
-    server->send(400, "application/json", "{\"error\":\"method must be a string\"}");
-    return;
-  }
-  std::string method = methodField | "GET";
-  std::transform(method.begin(), method.end(), method.begin(),
-                 [](unsigned char c) { return static_cast<char>(toupper(c)); });
-  // HEAD would wait for a body that never comes; other verbs are not plugin downloads.
-  if (method != "GET" && method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE") {
-    server->send(400, "application/json", "{\"error\":\"unsupported method\"}");
-    return;
-  }
-  // The body stays in DRAM, and goes out as one TLS record, while the session
-  // needs its heap: keep it small, and check it before copying.
-  static constexpr size_t FETCH_MAX_REQUEST_BODY = 4 * 1024;
-  const JsonVariantConst bodyField = req["body"];
-  if (!bodyField.isNull() && !bodyField.is<const char*>()) {
-    server->send(400, "application/json", "{\"error\":\"body must be a string\"}");
-    return;
-  }
-  // JsonString keeps the decoded length, so a \u0000 in the body is sent too.
-  const JsonString rawBody = bodyField.as<JsonString>();
-  if (rawBody.size() > FETCH_MAX_REQUEST_BODY) {
-    server->send(400, "application/json", "{\"error\":\"body over 4KB\"}");
-    return;
-  }
-  const std::string requestBody = rawBody.isNull() ? std::string() : std::string(rawBody.c_str(), rawBody.size());
-  // Only a GET without a body resumes and follows redirects. Any other request
-  // is sent once: replaying it could repeat its effect, and its headers must
-  // not follow a redirect.
-  const bool resumable = method == "GET" && requestBody.empty();
-  if (!resumable && (requestedOffset != 0 || segmentLimit != 0)) {
-    server->send(400, "application/json", "{\"error\":\"offset and maxBytes need a GET without a body\"}");
     return;
   }
 
@@ -2634,72 +2347,32 @@ void CrossPointWebServer::handleFetch() {
     written = 0;
     return Storage.openFileForWrite("PLG", part, file);
   };
-  // A failed single request's first bytes, so the plugin can tell why. The
-  // resumable GET's transport discards error bodies.
-  static constexpr size_t FETCH_ERROR_BODY_LIMIT = 512;
-  std::string errorBody;
-  const auto feedWatchdog = [&] {
-    resetTaskWatchdogIfSubscribed();
-    keepBrowserAlive();
-    return false;  // never aborts; only feeds
-  };
-  const auto configureClient = [](freeink::SecureHttpClient& http) {
-    http.setUserAgent("CrossPoint");
-    // The SecureNet transport ships no CA bundle, so peer verification always
-    // fails (wolfSSL -188); skip it like HttpDownloader does. Traffic stays
-    // TLS-encrypted, just unauthenticated — matching the prior library-lending flow.
-    http.setInsecure();
-    // Some delivery servers assemble books on the fly and can stall mid-body
-    // while packaging; the default 15s no-data timeout truncates those downloads.
-    http.setTimeout(60000);
-  };
-  freeink::FetchResult result;
-  if (resumable) {
-    result = freeink::fetchResumable(
-        url, options,
-        [&](freeink::SecureHttpClient& http, const bool sameOrigin) {
-          configureClient(http);
-          // The plugin's headers (typically its Authorization) stay with the
-          // starting origin; a redirect to another server gets none of them.
-          if (sameOrigin && !requestHeaders.empty()) {
-            // Handshake before the client copies the headers: a several-KB session
-            // cookie would otherwise take heap the handshake needs. A failed connect
-            // is retried, and reported, by the request itself.
-            http.connect(feedWatchdog);
-            for (const auto& header : requestHeaders) http.addHeader(header.first, header.second);
-          }
-        },
-        sink,
-        // The write callback only runs when bytes arrive; with the 60s no-data
-        // timeout a server stall would starve this task's WDT subscription.
-        // shouldAbort is polled in every wait loop, and by connect().
-        feedWatchdog);
-  } else {
-    freeink::SecureHttpClient http;  // redirects are not followed (SDK default)
-    configureClient(http);
-    if (http.begin(url)) {
-      // Same reason as above: handshake before copying the headers.
-      if (!requestHeaders.empty()) http.connect(feedWatchdog);
-      for (const auto& header : requestHeaders) http.addHeader(header.first, header.second);
-      result.status = http.sendRequest(
-          method.c_str(), reinterpret_cast<const uint8_t*>(requestBody.data()), requestBody.size(),
-          [&](const uint8_t* data, size_t len) {
-            const int status = http.getStatus();
-            if (status >= 200 && status < 300) return sink.write(data, len);
-            errorBody.append(reinterpret_cast<const char*>(data),
-                             std::min(len, FETCH_ERROR_BODY_LIMIT - errorBody.size()));
-            resetTaskWatchdogIfSubscribed();
-            return errorBody.size() < FETCH_ERROR_BODY_LIMIT;  // stop once the limit is kept
-          },
-          feedWatchdog);
-      result.bytes = written;
-      result.total = http.hasContentLength() ? http.getContentLength() : 0;
-      result.stopped = sdFull;
-      result.complete = result.status >= 200 && result.status < 300 && http.responseComplete() && !sdFull;
-    } else {
-      result.status = -1;
-    }
-  }
+  const freeink::FetchResult result = freeink::fetchResumable(
+      url, options,
+      [&](freeink::SecureHttpClient& http, const bool sameOrigin) {
+        http.setUserAgent("CrossNext");
+        // The SecureNet transport ships no CA bundle, so peer verification always
+        // fails (wolfSSL -188); skip it like HttpDownloader does. Traffic stays
+        // TLS-encrypted, just unauthenticated — matching the prior library-lending flow.
+        http.setInsecure();
+        // Some delivery servers assemble books on the fly and can stall mid-body
+        // while packaging; the default 15s no-data timeout truncates those downloads.
+        http.setTimeout(60000);
+        // The plugin's headers (typically its Authorization) stay with the
+        // starting origin; a redirect to another server gets none of them.
+        if (sameOrigin) {
+          for (const auto& header : requestHeaders) http.addHeader(header.first, header.second);
+        }
+      },
+      sink,
+      // The write callback only runs when bytes arrive; with the 60s no-data
+      // timeout a server stall would starve this task's WDT subscription.
+      // shouldAbort is polled in every wait loop.
+      [&] {
+        resetTaskWatchdogIfSubscribed();
+        keepBrowserAlive();
+        return false;  // never aborts; only feeds
+      });
   if (file.isOpen()) {
     file.flush();
     file.close();
@@ -2731,15 +2404,10 @@ void CrossPointWebServer::handleFetch() {
   if (!ok2xx) {
     Storage.remove(part.c_str());
     resp["error"] = status < 0 ? "transport failure" : "http status";
-    // The cap may have cut a UTF-8 character: drop its partial tail.
-    errorBody.resize(utf8SafeTruncateBuffer(errorBody.data(), static_cast<int>(errorBody.size())));
-    if (!errorBody.empty()) resp["body"] = errorBody;
   } else if (complete && !Storage.replaceFile(part.c_str(), dest.c_str())) {
     Storage.remove(part.c_str());
     complete = false;
     resp["error"] = "sd write failed";
-  } else if (complete && library::isLibraryBookFile(dest)) {
-    library::markLibraryIndexDirty();
   }
   resp["status"] = status;
   resp["bytes"] = written;
@@ -2780,10 +2448,6 @@ void CrossPointWebServer::handlePluginFsUpload() {
       st.started = true;
       st.errorStatus = 0;
       st.error = nullptr;
-      if (!SETTINGS.pluginsEnabled) {
-        fail(403, "plugin system disabled");
-        return;
-      }
       const String plugin = server->arg("plugin");
       if (!safeComponent(plugin) || !protectedpaths::isPluginPath(st.path)) {
         LOG_ERR("WEB", "Rejected plugin file write: plugin='%s' path='%s'", plugin.c_str(), st.path.c_str());
@@ -2822,8 +2486,6 @@ void CrossPointWebServer::handlePluginFsUpload() {
         fail(400, "empty body");
       } else if (!Storage.replaceFile(st.tmp.c_str(), st.path.c_str())) {
         fail(500, "sd write failed");
-      } else if (library::isLibraryBookFile(st.path)) {
-        library::markLibraryIndexDirty();
       }
       return;
     case UPLOAD_FILE_ABORTED:
@@ -2834,10 +2496,6 @@ void CrossPointWebServer::handlePluginFsUpload() {
 
 void CrossPointWebServer::handlePluginFs() {
   auto& st = pluginFsUpload;
-  if (!SETTINGS.pluginsEnabled && !st.started) {
-    server->send(403, "text/plain", "plugin system disabled");
-    return;
-  }
   if (!st.started) {
     server->send(400, "application/json", "{\"error\":\"missing file part\"}");
   } else if (st.errorStatus) {
@@ -2853,45 +2511,36 @@ void CrossPointWebServer::handlePluginFs() {
   st.started = false;
 }
 
-// POST /api/book-key {path, key (base64, 16 or 32 bytes), expires?} -> {ok}
+// POST /api/book-key {path, key (base64, 16 bytes), expires?} -> {ok}
 // Stores a protected book's content key, wrapped to this device, as
 // "<path>.key" for the reader to open the book with.
 void CrossPointWebServer::handleBookKey() {
-  if (rejectIfPluginsDisabled()) return;
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const std::string path = req["path"] | "";
   const char* keyB64 = req["key"] | "";
   const int64_t expires = req["expires"] | static_cast<int64_t>(0);
-  uint8_t key[bookkey::MAX_KEY_LEN];
+  uint8_t key[bookkey::KEY_LEN];
   const int32_t n = freeink::content::base64Decode(keyB64, strlen(keyB64), key, sizeof(key));
-  if (!protectedpaths::isPluginPath(path) || (n != 16 && n != 32) || expires < 0) {
+  if (!protectedpaths::isPluginPath(path) || n != static_cast<int32_t>(sizeof(key)) || expires < 0) {
     server->send(400, "application/json", "{\"error\":\"bad path/key\"}");
     return;
   }
-  if (!bookkey::write(path, key, static_cast<size_t>(n), expires)) {
+  if (!bookkey::write(path, key, expires)) {
     server->send(500, "application/json", "{\"error\":\"cannot store key\"}");
     return;
   }
   server->send(200, "application/json", "{\"ok\":true}");
 }
 
-// Served even while plugins are disabled: its empty state tells the user how to enable them.
-void CrossPointWebServer::handlePluginsPage() const {
-  sendStaticContent(server.get(), PluginsPageHtml, sizeof(PluginsPageHtml), PluginsPageHtmlETag, "text/html");
-  LOG_DBG("WEB", "Served plugins page");
-}
-
 void CrossPointWebServer::handlePluginRunnerPage() const {
-  if (rejectIfPluginsDisabled()) return;
   sendStaticContent(server.get(), RunnerPageHtml, sizeof(RunnerPageHtml), RunnerPageHtmlETag, "text/html");
   LOG_DBG("WEB", "Served plugin runner page");
 }
 
 CrossPointWebServer::PluginJob* CrossPointWebServer::allocPluginJob() {
-  if (!pluginJobs) pluginJobs = makeUniqueNoThrow<PluginJob[]>(MAX_PLUGIN_JOBS);
   PluginJob* best = nullptr;
-  for (PluginJob& job : pluginJobSlots()) {
+  for (auto& job : pluginJobs) {
     if (job.state == JOB_EMPTY) return &job;
     const bool finished = job.state == JOB_DONE || job.state == JOB_ERROR;
     if (finished && (!best || job.updatedAt < best->updatedAt)) best = &job;
@@ -2901,7 +2550,6 @@ CrossPointWebServer::PluginJob* CrossPointWebServer::allocPluginJob() {
 
 // POST /api/plugin-jobs {plugin, action, args?} -> {id}
 void CrossPointWebServer::handlePluginJobSubmit() {
-  if (rejectIfPluginsDisabled()) return;
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const String plugin = req["plugin"] | "";
@@ -2921,8 +2569,7 @@ void CrossPointWebServer::handlePluginJobSubmit() {
   }
   PluginJob* job = allocPluginJob();
   if (!job) {
-    server->send(503, "application/json",
-                 pluginJobs ? "{\"error\":\"job queue full\"}" : "{\"error\":\"out of memory\"}");
+    server->send(503, "application/json", "{\"error\":\"job queue full\"}");
     return;
   }
   *job = PluginJob{};
@@ -2940,10 +2587,9 @@ void CrossPointWebServer::handlePluginJobSubmit() {
 
 // GET /api/plugin-jobs/claim?plugin=<name> -> {id, action, args} or {id:0}
 void CrossPointWebServer::handlePluginJobClaim() {
-  if (rejectIfPluginsDisabled()) return;
   const String plugin = server->arg("plugin");
   const uint32_t now = millis();
-  for (PluginJob& job : pluginJobSlots()) {
+  for (auto& job : pluginJobs) {
     if (job.state == JOB_RUNNING && now - job.updatedAt > PLUGIN_JOB_LEASE_MS) {
       job.state = JOB_PENDING;
       job.updatedAt = now;
@@ -2965,12 +2611,11 @@ void CrossPointWebServer::handlePluginJobClaim() {
 // 409 when `claim` is stale: the lease expired and another runner re-claimed
 // the job, so this late result must not overwrite that runner's.
 void CrossPointWebServer::handlePluginJobComplete() {
-  if (rejectIfPluginsDisabled()) return;
   JsonDocument req;
   if (!readJsonBody(req)) return;
   const uint32_t id = req["id"] | 0;
   const uint32_t claim = req["claim"] | 0;
-  for (PluginJob& job : pluginJobSlots()) {
+  for (auto& job : pluginJobs) {
     if (job.id != id) continue;
     if (job.state == JOB_DONE || job.state == JOB_ERROR) {
       server->send(200, "application/json", "{\"ok\":true}");
@@ -3001,10 +2646,9 @@ void CrossPointWebServer::handlePluginJobComplete() {
 
 // GET /api/plugin-jobs/status?id=<n> -> {id, state, result}
 void CrossPointWebServer::handlePluginJobStatus() {
-  if (rejectIfPluginsDisabled()) return;
   const uint32_t id = strtoul(server->arg("id").c_str(), nullptr, 10);
   static constexpr const char* STATE_NAMES[] = {"empty", "pending", "running", "done", "error"};
-  for (PluginJob& job : pluginJobSlots()) {
+  for (auto& job : pluginJobs) {
     if (job.id != id || job.state == JOB_EMPTY) continue;
     const std::string msg = "{\"id\":" + std::to_string(id) + ",\"state\":\"" + STATE_NAMES[job.state] +
                             "\",\"result\":" + (job.result[0] ? job.result : "null") + "}";
@@ -3031,7 +2675,6 @@ void CrossPointWebServer::wsEventCallback(uint8_t num, WStype_t type, uint8_t* p
 //   3. Server sends TEXT "PROGRESS:<received>:<total>" after each chunk
 //   4. Server sends TEXT "DONE" or "ERROR:<message>" when complete
 void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
-  if (num < WEBSOCKETS_SERVER_CLIENT_MAX) wsLastActivity[num] = type == WStype_DISCONNECTED ? 0 : millis();
   switch (type) {
     case WStype_DISCONNECTED:
       LOG_DBG("WS", "Client %u disconnected", num);
@@ -3127,7 +2770,7 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
             wsLastCompleteAt = millis();
             LOG_DBG("WS", "Zero-byte upload complete: %s", filePath.c_str());
             clearBookCache(filePath.c_str());
-            if (library::isLibraryBookFile(filePath.c_str())) library::markLibraryIndexDirty();
+            if (isLibraryBookFile(wsUploadFileName)) library::markLibraryIndexDirty();
             wsServer->sendTXT(num, "DONE");
             wsLastProgressSent = 0;
             break;
@@ -3197,7 +2840,7 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
         if (!filePath.endsWith("/")) filePath += "/";
         filePath += wsUploadFileName;
         clearBookCache(filePath.c_str());
-        if (library::isLibraryBookFile(filePath.c_str())) library::markLibraryIndexDirty();
+        if (isLibraryBookFile(wsUploadFileName)) library::markLibraryIndexDirty();
 
         wsServer->sendTXT(num, "DONE");
         wsLastProgressSent = 0;
@@ -3217,88 +2860,46 @@ void CrossPointWebServer::handleFontsPage() const {
   LOG_DBG("WEB", "Served fonts page");
 }
 
-// Adds {name, size} for each family file, in family.files order. The sizes come
-// from one listing of the folder holding the files: opening each file by path
-// walks the folders again for every file, which is slow with many families.
-// Unreadable files report size 0.
-static void addFontFiles(const SdCardFontFamilyInfo& family, JsonArray files) {
-  char path[SdCardFontFamilyInfo::PATH_BUFFER_SIZE];
-  char folder[sizeof(path)] = "";
-  for (const auto& file : family.files) {
-    if (!family.filePath(file, path, sizeof(path))) continue;
-    char* slash = strrchr(path, '/');
-    JsonObject entry = files.add<JsonObject>();
-    entry["name"] = slash ? slash + 1 : path;
-    entry["size"] = 0;
-    if (slash && !folder[0]) {
-      *slash = '\0';
-      strcpy(folder, path);
-    }
-  }
-  if (!folder[0]) return;
-  HalFile dir = Storage.open(folder);
-  if (!dir) return;
-
-  char entryName[128];
-  size_t found = 0;
-  while (found < files.size()) {
-    HalFile item = dir.openNextFile();
-    if (!item) break;
-    if (item.isDirectory()) continue;
-    item.getName(entryName, sizeof(entryName));
-    for (JsonObject entry : files) {
-      if (strcmp(entry["name"] | "", entryName) == 0) {
-        entry["size"] = static_cast<unsigned long>(item.size());
-        found++;
-        break;
-      }
-    }
-  }
-}
-
 void CrossPointWebServer::handleFontList() const {
   // Pick up any uploads/deletes that happened since the last reader load.
   const_cast<SdCardFontSystem&>(sdFontSystem).refreshIfDirty();
   const auto& families = sdFontSystem.registry().getFamilies();
 
-  // Serialize one family at a time: with many families, the whole document plus
-  // its serialized copy does not fit in the heap of a DRAM-only board.
-  server->setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server->send(200, "application/json", "");
-  ChunkedReply reply(*server);
-  char head[80];
+  JsonDocument doc;
+  JsonArray arr = doc["families"].to<JsonArray>();
+  doc["maxFamilies"] = SdCardFontRegistry::MAX_SD_FAMILIES;
   // Vector (.ttf/.otf) fonts need PSRAM to stay resident; DRAM-only boards
   // only take pre-rendered .cpfont uploads.
-  snprintf(head, sizeof(head), "{\"maxFamilies\":%d,\"vectorFonts\":%s,\"families\":[",
-           SdCardFontRegistry::MAX_SD_FAMILIES, HalMemory::getPsramHeap().totalBytes > 0 ? "true" : "false");
-  reply.write(head);
+  doc["vectorFonts"] = HalMemory::getPsramHeap().totalBytes > 0;
 
-  JsonDocument doc;
   for (const auto& family : families) {
-    doc.clear();
-    doc["name"] = family.name;
+    JsonObject fObj = arr.add<JsonObject>();
+    fObj["name"] = family.name;
 
-    JsonArray sizes = doc["sizes"].to<JsonArray>();
+    JsonArray sizes = fObj["sizes"].to<JsonArray>();
     for (uint8_t s : family.availableSizes()) {
       sizes.add(s);
     }
 
-    addFontFiles(family, doc["files"].to<JsonArray>());
+    JsonArray files = fObj["files"].to<JsonArray>();
+    for (const auto& file : family.files) {
+      JsonObject fileObj = files.add<JsonObject>();
+      // Extract filename from full path
+      const char* name = strrchr(file.path.c_str(), '/');
+      fileObj["name"] = name ? name + 1 : file.path.c_str();
 
-    if (doc.overflowed()) {
-      // Leave the JSON unterminated so the page reports a failed load, not a short list.
-      LOG_ERR("WEB", "OOM: font list entry");
-      reply.end();
-      return;
+      // Stat the file for size
+      HalFile f;
+      if (Storage.openFileForRead("WEB", file.path.c_str(), f)) {
+        fileObj["size"] = static_cast<unsigned long>(f.size());
+        f.close();
+      } else {
+        fileObj["size"] = 0;
+      }
     }
-    if (&family != &families.front()) reply.write(',');
-    serializeJson(doc, reply);
-    yield();
-    resetTaskWatchdogIfSubscribed();  // writing a full chunk blocks on the network
   }
 
-  reply.write("]}");
-  reply.end();
+  sendJson(doc);
 }
 
 void CrossPointWebServer::handleFontUploadData() {
@@ -3464,7 +3065,6 @@ void CrossPointWebServer::handleFontUpload() {
   } else {
     server->send(400, "application/json", "{\"error\":\"Invalid font file\"}");
   }
-  fontUpload.valid = false;  // A later POST without a file part must not repeat this result
 }
 
 void CrossPointWebServer::handleFontDelete() {
@@ -3489,4 +3089,681 @@ void CrossPointWebServer::handleFontDelete() {
     server->send(500, "application/json", "{\"error\":\"Delete failed\"}");
     LOG_ERR("WEB", "Failed to delete font family: %s", familyName);
   }
+}
+
+// Settings a network client must never be able to change, however
+// authenticated the surface feels.
+//
+// The settings list drives the menu, the on-disk JSON AND the web API from one
+// entry, which is exactly why devMode had to be excluded by hand: adding the
+// toggle gave it a web setter for free, and that setter lives on the reader's
+// UNAUTHENTICATED web UI. Anyone on the network, while the transfer screen was
+// open, could have switched Developer Mode on permanently and across reboots --
+// using the temporary surface to enable the persistent one. Turning this device
+// into a development device is a decision made at the device.
+bool CrossPointWebServer::isLocalOnlySetting(const char* key) { return key && strcmp(key, "devMode") == 0; }
+
+// Every /api/dev/ route except pairing goes through here first.
+//
+// Two conditions, and the order matters for what a stranger can learn: dev mode
+// off is reported as 404, indistinguishable from a build that has no such
+// route, so scanning a network tells you nothing about which devices could be
+// turned into targets. Only once dev mode is on does a wrong token get a 401.
+bool CrossPointWebServer::devTokenOk() const {
+  if (!devmode::status().enabled) return false;
+  std::string token;  // header only; see devAuthorised()
+  if (server->hasHeader("X-Dev-Token")) token = server->header("X-Dev-Token").c_str();
+  return devmode::tokenValid(token);
+}
+
+bool CrossPointWebServer::devAuthorised() {
+  const auto st = devmode::status();
+  if (!st.enabled) {
+    server->send(404, "text/plain", "not found\n");
+    return false;
+  }
+  // Header only. Accepting ?token= made every follow-up call a CORS-simple
+  // request that a page could issue without a preflight; requiring a custom
+  // header means a browser must preflight, and with CORS off on this surface
+  // the preflight fails. curl is unaffected.
+  std::string token;
+  if (server->hasHeader("X-Dev-Token")) token = server->header("X-Dev-Token").c_str();
+  if (!devmode::tokenValid(token)) {
+    // Deliberately not logged. This is reachable by anyone on the network, and
+    // logPrintf writes every level into a 16-line RTC ring -- so an
+    // unauthenticated client could erase the pre-panic tail that /api/dev/crash
+    // exists to deliver, sixteen requests in, from a page the owner merely
+    // visited. The 401 tells the caller everything the log would have.
+    server->send(401, "text/plain", "pair first: POST /api/dev/pair with the code on the device\n");
+    return false;
+  }
+  return true;
+}
+
+// Exchange the six digits shown on the device for a token.
+//
+// Rate-limited and self-rotating; see devmode::pair().
+//
+// An earlier version argued no limit was needed because "the window is a person
+// standing at the device". That was wrong twice over on this branch: dev mode
+// keeps the device awake indefinitely, so the window is however long the toggle
+// is on, and CORS made the endpoint reachable from any page the user visits
+// rather than only from the LAN.
+void CrossPointWebServer::handleDevPair() {
+  const auto st = devmode::status();
+  if (!st.enabled) {
+    server->send(404, "text/plain", "not found\n");
+    return;
+  }
+  std::string code;
+  if (server->hasArg("code")) code = server->arg("code").c_str();
+  // BEFORE pair(), not after. pair() mutates the window on every evaluated
+  // guess, so asking afterwards always finds one open and every refusal became
+  // a 429 -- telling someone who had simply mistyped that "the code you have is
+  // fine, wait 30s", which is the exact inversion of the advice this was added
+  // to fix. Read it first: non-zero here means the attempt was never looked at.
+  const unsigned long retry = devmode::pairRetryInMs();
+  const std::string token = devmode::pair(code);
+  if (token.empty()) {
+    // Distinguish "wrong" from "closed". They are the same empty return, and
+    // saying "wrong code" to someone holding the RIGHT code -- because a flood,
+    // or their own earlier typos, closed the window -- sends them to re-read six
+    // digits that were already correct.
+    if (retry > 0) {
+      server->send(429, "text/plain",
+                   "not checked: pairing is rate-limited for another " + String(retry) +
+                       "ms. The code on the screen has NOT changed -- wait and send the same one.\n");
+    } else {
+      server->send(401, "text/plain", "wrong code\n");
+    }
+    return;
+  }
+  JsonDocument doc;
+  doc["token"] = token;
+  doc["device"] = BoardConfig::ACTIVE.name;
+  doc["version"] = CROSSPOINT_VERSION;
+  String out;
+  serializeJson(doc, out);
+  server->send(200, "application/json", out);
+}
+
+// Switch Developer Mode off, from the computer.
+//
+// This exists because the obvious way to close a device does not work and the
+// script used to claim it did. Flashing a release image does NOT turn Developer
+// Mode off: the setting is a field in /.crosspoint/settings.json ON THE SD CARD,
+// and flashing replaces the firmware, not the card. Worse, every build now
+// carries these routes -- that is the whole point of it being a runtime setting
+// -- so a device flashed "back to a release" kept joining Wi-Fi and kept
+// answering /api/dev/flash while its owner believed it had been closed.
+//
+// Applied immediately: saveToFile() persists it, and devmode::update() sees the
+// setting change on the next loop and tears the server and the radio down.
+void CrossPointWebServer::handleDevDisable() {
+  if (!devAuthorised()) return;
+  SETTINGS.devMode = 0;
+  SETTINGS.saveToFile();
+  LOG_INF("DEVMODE", "switched off by a paired client");
+  server->send(200, "text/plain", "OK developer mode off\n");
+}
+
+// What the device remembers about the last time it died.
+//
+// Nothing here is captured for this endpoint; all of it already existed and was
+// only reachable by standing in front of the device. HalSystem keeps the panic
+// message and a stack backtrace in RTC_NOINIT memory, and Logging keeps the
+// last lines in a second RTC_NOINIT ring with a magic word guarding against
+// cold-boot garbage. Both survive the reset that a panic causes, which is the
+// whole reason they are in RTC memory rather than the heap.
+//
+// The log tail matters more than the backtrace most of the time: a backtrace
+// says where it died, the preceding lines say what it was doing.
+//
+// READ-ONLY. Fetching a crash report must not destroy it -- two people
+// debugging the same device would otherwise race, and the first curl would win
+// and the second would see a healthy device. Clearing stays where it was: the
+// on-device crash screen, when a human dismisses it.
+void CrossPointWebServer::handleDevCrash() {
+  if (!devAuthorised()) return;
+
+  JsonDocument doc;
+  const bool corrupt = sanitizeLogHead();
+  doc["panicked"] = HalSystem::isRebootFromPanic();
+  doc["panic"] = HalSystem::getPanicInfo(true);
+  // A corrupt ring is reported rather than hidden: an empty "logs" that means
+  // "nothing was logged" and one that means "RTC memory was garbage" are
+  // different findings, and guessing between them wastes a debugging session.
+  doc["logsValid"] = !corrupt;
+  doc["logs"] = corrupt ? "" : getLastLogs();
+  doc["uptime"] = millis() / 1000;
+  doc["version"] = CROSSPOINT_VERSION;
+
+  String out;
+  serializeJson(doc, out);
+  server->send(200, "application/json", out);
+}
+
+// The same ring, for a device that has not crashed. Sixteen lines is short; it
+// is what fits in RTC memory beside the panic buffers, and it is deliberately
+// the same buffer as the crash report so there is one thing to reason about
+// rather than two that can disagree.
+void CrossPointWebServer::handleDevLog() {
+  if (!devAuthorised()) return;
+  if (sanitizeLogHead()) {
+    server->send(200, "text/plain", "");
+    return;
+  }
+  server->send(200, "text/plain", getLastLogs().c_str());
+}
+
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+// One input command per request, in the same words the serial bridge takes:
+// TAP x y [holdMs] / LONG x y / SWIPE x0 y0 x1 y1 [ms] / BTN NAME [holdMs].
+//
+// The body is the command, not a JSON envelope. It is what a person types into
+// curl and what drive.py already speaks, and a second encoding of four verbs
+// would be two things to keep in step for no reader's benefit.
+void CrossPointWebServer::handleDevInput() {
+  if (!devAuthorised()) return;
+  // The content type is load-bearing, and there is no recovering from the wrong
+  // one. This core only keeps a body whole under arg("plain") when it is NOT
+  // form-encoded; for application/x-www-form-urlencoded it runs the body
+  // through _parseArguments, which bails at the first field with no '=' and
+  // leaves args() == 0. An input command never contains '=', so a body sent the
+  // way `curl -d` and Python's urllib send it by default is not merely
+  // misplaced, it is gone. Say so in the error rather than guessing.
+  const String body = server->arg("plain");
+  if (body.isEmpty()) {
+    server->send(400, "text/plain",
+                 "ERR body must be one command, e.g. TAP 400 240\n"
+                 "    send it as Content-Type: text/plain -- a form-encoded body is\n"
+                 "    parsed away by the HTTP core before this handler sees it:\n"
+                 "      curl -H 'Content-Type: text/plain' --data-binary 'TAP 400 240' ...\n");
+    return;
+  }
+  // Trim, so a trailing newline from `curl --data-binary @file` is not an
+  // argument. The injector's vocabulary is line-oriented; the transport is not.
+  String line = body;
+  line.trim();
+  char reply[96];
+  const bool okay = devinput::runCommand(line.c_str(), reply, sizeof(reply));
+  // Refusals only, and not at DBG either: addToLogRingBuffer() is called for
+  // EVERY level (Logging.cpp:75), and these routes exist only in the envs that
+  // set LOG_LEVEL=2 -- so demoting an accepted tap to LOG_DBG changes the tag
+  // and nothing else. The RTC ring is 16 lines and it is the only diagnostic
+  // channel a Wi-Fi driver has; sixteen accepted taps would still erase whatever
+  // the driver was trying to read. The OK is already in the response the caller
+  // just read, so it carries nothing the caller does not have. A refusal does.
+  if (!okay) LOG_INF("WEB", "dev input refused: %s -> %s", line.c_str(), reply);
+  // 409 rather than 400 for "busy": the command was well formed and will work
+  // when the previous event finishes, which is a retry, not a fix.
+  const int code = okay ? 200 : (strncmp(reply, "ERR busy", 8) == 0 ? 409 : 400);
+  server->send(code, "text/plain", String(reply) + "\n");
+}
+
+// The serial transport's TX counters, over Wi-Fi.
+//
+// The whole point: when the cable wedges, CMD:CDCSTAT is unreachable by
+// definition, and the RTC log ring is sixteen lines. This is the only way to
+// ask a device with a dead cable what its cable did.
+void CrossPointWebServer::handleDevSerial() {
+  if (!devAuthorised()) return;
+  // 256: eight uint32 counters at their widest already ran to 145 characters,
+  // so 128 truncated silently -- snprintf is safe, but the line it produced was
+  // not the line it claimed to be.
+  char line[256];
+  devbridge::txStatsLine(line, sizeof(line));
+  server->send(200, "text/plain", String(line) + "\n");
+}
+
+// The framebuffer as it stands, 1bpp, row-major, MSB leftmost -- the same bytes
+// the serial bridge streams, so one host-side decoder serves both.
+//
+// Unlike the serial path this arrives whole rather than truncated, because TCP
+// has no equivalent of the CDC ring that drops what will not fit. It is still
+// chunked on the way out, for the reason given at the write loop below.
+void CrossPointWebServer::handleDevScreen() {
+  if (!devAuthorised()) return;
+  const uint8_t* fb = display.getFrameBuffer();
+  if (fb == nullptr) {
+    server->send(503, "text/plain", "ERR no framebuffer\n");
+    return;
+  }
+  const size_t size = display.getBufferSize();
+  // Width and height are not in the payload, so say them where a host decoder
+  // can read them. Queued before send(), which is what emits the header block.
+  //
+  // From the DISPLAY, not from BoardConfig: the host multiplies these to check
+  // the length it got, so they have to be the geometry that produced the byte
+  // count. The two agree on both device envs today, but the SDK has boards
+  // whose silicon frame and framebuffer frame differ, and there the mismatch
+  // would reject every screenshot as short.
+  server->sendHeader("X-Panel-Width", String(display.getDisplayWidth()));
+  server->sendHeader("X-Panel-Height", String(display.getDisplayHeight()));
+  server->setContentLength(size);
+  server->send(200, "application/octet-stream", "");
+
+  // Chunked, watchdog-fed, and stopping on a dead peer -- the same shape as
+  // handleDownload above, and for the same reason. NetworkClient::write resets
+  // its retry budget on every partial send, so one 48KB call against a peer
+  // that trickles can hold this loop indefinitely; handleClient() runs on the
+  // main loop, so that is the whole UI frozen, not a slow download.
+  NetworkClient client = server->client();
+  size_t sent = 0;
+  while (sent < size) {
+    resetTaskWatchdogIfSubscribed();
+    const size_t wrote = client.write(fb + sent, size - sent > 4096 ? 4096 : size - sent);
+    if (wrote == 0) break;  // peer gone; the short body is the honest answer
+    sent += wrote;
+  }
+  client.clear();
+  if (sent < size) LOG_ERR("WEB", "screen: client took %u of %u bytes", sent, size);
+}
+#endif  // CROSSPOINT_DEV_SERIAL_BRIDGE
+
+// Upload straight to the card, token-gated, so Developer Mode never has to
+// expose the file manager to move a firmware image across.
+//
+// Streams in chunks like every other upload path here; the body is 6MB and will
+// not fit anywhere else. The destination is fixed rather than caller-chosen: an
+// authenticated endpoint that writes an arbitrary path is a worse primitive
+// than one that writes the only path this feature needs.
+// ---------------------------------------------------------------------------
+// The Wallpapers surface: one page, its script, and one upload.
+// ---------------------------------------------------------------------------
+
+// One screen of text a person typed, with room to spare. A page left open on a
+// laptop can paste a book, and this is the only door a client can push bytes
+// through.
+constexpr size_t kNotesMaxBytes = 16 * 1024;
+
+void CrossPointWebServer::handleNotesPage() const {
+  sendStaticContent(server.get(), NotesPageHtml, sizeof(NotesPageHtml), NotesPageHtmlETag, "text/html");
+}
+
+void CrossPointWebServer::handleNotesText() {
+  if (notesPath.empty()) {
+    server->send(503, "text/plain", "No note is open on the reader.");
+    return;
+  }
+  // The name rides in a header rather than in the body, so the body is the note
+  // and nothing else: a page that has to strip a prelude off the text it shows
+  // is one bug away from saving the prelude back into the file.
+  String encoded;
+  for (const char c : notesName) {
+    if (static_cast<unsigned char>(c) < 0x80 && (isalnum(c) || c == '-' || c == '_' || c == '.' || c == ' ')) {
+      encoded += c;
+    } else {
+      char hex[4];
+      std::snprintf(hex, sizeof(hex), "%%%02X", static_cast<unsigned char>(c));
+      encoded += hex;
+    }
+  }
+  server->sendHeader("X-Note-Name", encoded);
+  // The page draws tick boxes, and writes them back, only for a list. It used
+  // to do both for everything, so saving a NOTE from a phone turned its
+  // paragraphs into a list.
+  server->sendHeader("X-Note-Kind", notesIsList ? "list" : "note");
+  server->sendHeader("Cache-Control", "no-store");
+  server->send(200, "text/plain; charset=utf-8", Storage.readFile(notesPath.c_str()));
+}
+
+void CrossPointWebServer::handleNotesSave() {
+  if (notesPath.empty()) {
+    server->send(503, "text/plain", "No note is open on the reader.");
+    return;
+  }
+  const String raw = server->arg("plain");
+  // A note is one screen of text somebody typed. The cap is here rather than in
+  // the app because this is the only door a client can push bytes through, and
+  // a page left open on a laptop can paste a book.
+  if (raw.length() > kNotesMaxBytes) {
+    server->send(413, "text/plain", "That is too long for a note.");
+    return;
+  }
+
+  // EVERY LINE BECOMES AN ITEM. Without this, a person typing "Milk" on their
+  // phone got a line the reader could not tick, could not delete and drew at
+  // half the size of a real one -- and the only way to avoid it was to type
+  // "- [ ] " by hand, nine keyboard taps before the first letter on an iOS
+  // keyboard, thirty for a shopping list. The page now teaches no syntax
+  // because there is none to get wrong.
+  std::string body(raw.c_str(), raw.length());
+  // Only a LIST gets markers written for it. A note is words somebody kept, and
+  // turning every line of it into a tick box would be the old two-kinds mistake
+  // wearing the opposite face. The kind is the reader's, not read off the file:
+  // an empty note is an empty file, which reads as a list.
+  if (notesIsList) notes::coerceToList(body);
+
+  // Beside itself, then renamed. Opening the real path truncates it first, so a
+  // connection dropped mid-write would leave a note that parses as empty --
+  // which reads exactly like a note somebody deleted.
+  const std::string part = notesPath + ".part";
+  {
+    HalFile file;
+    if (!Storage.openFileForWrite("NOTES", part.c_str(), file)) {
+      server->send(500, "text/plain", "The card would not take it.");
+      return;
+    }
+    if (!body.empty() && file.write(body.data(), body.size()) != static_cast<int>(body.size())) {
+      Storage.remove(part.c_str());
+      server->send(500, "text/plain", "The card would not take it.");
+      return;
+    }
+  }
+  Storage.remove(notesPath.c_str());
+  if (!Storage.rename(part.c_str(), notesPath.c_str())) {
+    Storage.remove(part.c_str());
+    server->send(500, "text/plain", "The card would not take it.");
+    return;
+  }
+  notesChanged = true;
+  server->send(200, "text/plain", "saved");
+}
+
+void CrossPointWebServer::handleWallpaperPage() const {
+  // sendStaticContent since upstream #2560: the same generated page, now
+  // with its ETag so a browser's conditional GET gets a 304.
+  sendStaticContent(server.get(), WallpaperPageHtml, sizeof(WallpaperPageHtml), WallpaperPageHtmlETag, "text/html");
+}
+
+void CrossPointWebServer::handleWallpaperScript() const {
+  server->sendHeader("Content-Encoding", "gzip");
+  server->send_P(200, "application/javascript", wallconvertJs, sizeof(wallconvertJs));
+}
+
+namespace {
+// The device names the file, never the client. That is not tidiness: it deletes
+// the traversal question and the collision question outright rather than
+// answering them. handleUpload thirty lines away takes upload.filename into a
+// path with no check at all (card #353), and the font handler beside it does
+// check -- so this fork has already proved it can go either way on the same
+// afternoon. There is nothing to validate if nothing is accepted.
+//
+// The original name is no loss: the picker captions a user's wallpaper with its
+// file stem, and a phone hands over "IMG_0001".
+std::string nextWallpaperPath() {
+  for (int i = 1; i <= wallpapers::kMaxUploadSlot; ++i) {
+    // The SHAPE comes from wallpapers::uploadFileName, which is also what the
+    // picker's harness picks a plausible arrival by and what
+    // host-tests/wallpapers builds its corpus from. Spelled here as well, it
+    // would go stale the first time one of the three moved.
+    const std::string path = std::string(wallpapers::kLibraryDir) + "/" + wallpapers::uploadFileName(i);
+    if (!Storage.exists(path.c_str())) return path;
+  }
+  return std::string();
+}
+}  // namespace
+
+void CrossPointWebServer::handleWallpaperUploadData() {
+#ifdef SIMULATOR
+  // The simulator's WebServer shim has no raw() body API. A PLATFORM gate, not
+  // a feature gate, exactly as /api/dev/upload carries.
+  return;
+#else
+  HTTPRaw& raw = server->raw();
+
+  if (raw.status == RAW_START) {
+    // Everything is decided HERE, because by RAW_END the whole body is already
+    // on the card -- but nothing is ANSWERED here: sending a response while the
+    // body is still being parsed corrupts the server.
+    wallUpload.accepted = false;
+    wallUpload.ok = false;
+    wallUpload.written = 0;
+    wallUpload.refusal = nullptr;
+
+    if (!isWallpapers()) {
+      wallUpload.refusal = "not this surface";
+      return;
+    }
+
+    // The free-space precondition the WebDAV path never had. Three outcomes,
+    // and Unknown REFUSES: freeBytes() returns false when the cluster walk
+    // failed, which is an abnormal card and never "the card is empty".
+    // Refusing costs a retry; proceeding costs the one user whose card was
+    // already in trouble -- and the floor exists to protect Study's review log,
+    // not this app.
+    uint64_t freeNow = 0;
+    const bool queryOk = Storage.freeBytes(freeNow);
+    if (wallpapers::roomFor(queryOk, freeNow, wallpapers::kCardFloorBytes) != wallpapers::Room::Ok) {
+      wallUpload.refusal = "The reader is low on space. Nothing was written.";
+      return;
+    }
+
+    if (!Storage.exists(wallpapers::kLibraryDir) && !Storage.mkdir(wallpapers::kLibraryDir)) {
+      wallUpload.refusal = "The reader could not open its wallpapers folder.";
+      return;
+    }
+
+    wallUpload.final = nextWallpaperPath();
+    if (wallUpload.final.empty()) {
+      wallUpload.refusal = "The reader has too many wallpapers already.";
+      return;
+    }
+    wallUpload.target = wallUpload.final + ".part";
+    Storage.remove(wallUpload.target.c_str());
+    if (!Storage.openFileForWrite("WALL", wallUpload.target, wallUpload.file)) {
+      wallUpload.refusal = "The reader could not write to its card.";
+      return;
+    }
+    wallUpload.accepted = true;
+    LOG_INF("WALL", "receiving wallpaper -> %s", wallUpload.target.c_str());
+    return;
+  }
+
+  if (!wallUpload.accepted) return;
+
+  if (raw.status == RAW_WRITE) {
+    // Bounded before a byte is written, not after: kWallpaperFileBytes is the
+    // only size the panel accepts, so a longer body is a wrong file or a
+    // hostile one and there is no reason to spend the card on it.
+    if (wallUpload.written + raw.currentSize > wallpapers::kWallpaperFileBytes) {
+      wallUpload.refusal = "That is not a reader wallpaper.";
+      wallUpload.accepted = false;
+      wallUpload.file.close();
+      Storage.remove(wallUpload.target.c_str());
+      return;
+    }
+    if (wallUpload.file.write(raw.buf, raw.currentSize) == raw.currentSize) {
+      wallUpload.written += raw.currentSize;
+    } else {
+      wallUpload.refusal = "The card stopped accepting the file.";
+      wallUpload.accepted = false;
+      wallUpload.file.close();
+      Storage.remove(wallUpload.target.c_str());
+    }
+    return;
+  }
+
+  if (raw.status == RAW_END) {
+    wallUpload.file.close();
+    // A short body is a dropped connection. The .part is removed rather than
+    // left behind: sweepPartFiles() only matches .part, which is why this path
+    // writes one instead of the .davtmp WebDAV would have left invisible to
+    // both the sweep and the picker.
+    if (wallUpload.written != wallpapers::kWallpaperFileBytes) {
+      Storage.remove(wallUpload.target.c_str());
+      wallUpload.refusal = "The picture did not arrive completely.";
+      return;
+    }
+    Storage.remove(wallUpload.final.c_str());
+    if (!Storage.rename(wallUpload.target.c_str(), wallUpload.final.c_str())) {
+      Storage.remove(wallUpload.target.c_str());
+      wallUpload.refusal = "The card refused to name the file.";
+      return;
+    }
+    wallUpload.ok = true;
+    LOG_INF("WALL", "wallpaper saved: %s", wallUpload.final.c_str());
+  }
+#endif
+}
+
+void CrossPointWebServer::handleWallpaperUpload() {
+  // Read ONCE and clear, the lesson /api/dev/upload paid for: ok is only ever
+  // set by the raw callback, so a PUT that never reaches it -- no body, or a
+  // body the core drops -- would otherwise inherit the PREVIOUS request's
+  // success and be answered 204. That is a success reported for an upload that
+  // did not happen, and the phone would say "it is on your reader".
+  const bool uploaded = wallUpload.ok;
+  const char* refusal = wallUpload.refusal;
+  wallUpload.ok = false;
+  wallUpload.refusal = nullptr;
+
+  if (uploaded) {
+    server->send(204, "text/plain", "");
+    return;
+  }
+  server->send(refusal != nullptr ? 507 : 400, "text/plain",
+               refusal != nullptr ? refusal : "The reader did not receive a picture.");
+}
+
+void CrossPointWebServer::handleDevUploadData() {
+#ifdef SIMULATOR
+  // The simulator's WebServer shim has no raw() body API, and the emulator has
+  // neither a radio to reach nor flash to write. A PLATFORM gate, not a feature
+  // gate: Developer Mode still ships in every device build including releases,
+  // which is the whole point of it not being a build flag.
+  return;
+#else
+  HTTPRaw& raw = server->raw();
+
+  if (raw.status == RAW_START) {
+    // Decide authorisation here, because by RAW_END the whole body would
+    // already be on the card -- but do NOT answer here. Sending a response
+    // while the body is still being parsed corrupts the server.
+    devUpload.authorised = devTokenOk();
+    devUpload.written = 0;
+    devUpload.ok = false;
+    if (!devUpload.authorised) return;
+    // NOT a watchdog guard for the unauthorised case, whatever it looks like:
+    // the body is drained in RAW_WRITE chunks that this return never reaches,
+    // and resetTaskWatchdogIfSubscribed() is a no-op across this whole
+    // firmware anyway -- nothing subscribes loopTask to the TWDT. The real
+    // exposure is in Known limits: an unauthenticated client can hold loop()
+    // by trickling a body, which is a freeze, not a reset.
+    resetTaskWatchdogIfSubscribed();
+    Storage.remove(kDevUploadPath);
+    if (!Storage.openFileForWrite("DEVMODE", kDevUploadPath, devUpload.file)) {
+      LOG_ERR("DEVMODE", "cannot open %s for write", kDevUploadPath);
+      return;
+    }
+    LOG_INF("DEVMODE", "receiving firmware -> %s", kDevUploadPath);
+    return;
+  }
+
+  if (!devUpload.authorised) return;
+
+  if (raw.status == RAW_WRITE) {
+    resetTaskWatchdogIfSubscribed();
+    if (devUpload.file && devUpload.file.write(raw.buf, raw.currentSize) == raw.currentSize) {
+      devUpload.written += raw.currentSize;
+    } else {
+      LOG_ERR("DEVMODE", "write failed at %u bytes", static_cast<unsigned>(devUpload.written));
+      devUpload.file.close();
+    }
+    return;
+  }
+
+  if (raw.status == RAW_END) {
+    if (devUpload.file) {
+      devUpload.file.close();
+      devUpload.ok = devUpload.written > 0;
+      LOG_INF("DEVMODE", "received %u bytes", static_cast<unsigned>(devUpload.written));
+    }
+    return;
+  }
+
+  if (raw.status == RAW_ABORTED) {
+    LOG_ERR("DEVMODE", "upload aborted at %u bytes", static_cast<unsigned>(devUpload.written));
+    devUpload.file.close();
+    devUpload.ok = false;
+  }
+#endif
+}
+
+void CrossPointWebServer::handleDevUpload() {
+  // A request with no multipart body never reaches the data callback at all, so
+  // devUpload.authorised is still false from the previous request. Re-test here
+  // rather than trust it, and let devAuthorised() send the refusal.
+  if (!devAuthorised()) {
+    devUpload.authorised = false;
+    devUpload.ok = false;  // same reason as the consume below
+    return;
+  }
+  // Read ONCE and clear. ok is only ever set by the raw callback, so a PUT that
+  // never reaches it -- no body, or a body the core drops -- would otherwise
+  // inherit the previous request's success and be answered 200 with the
+  // previous path and size. That is a success reported for an upload that did
+  // not happen, and wifi-flash.sh would go on to ask the device to flash it.
+  const bool uploaded = devUpload.ok;
+  devUpload.ok = false;
+  if (!uploaded) {
+    server->send(500, "text/plain", "upload failed\n");
+    return;
+  }
+  JsonDocument doc;
+  doc["path"] = kDevUploadPath;
+  doc["size"] = devUpload.written;
+  String out;
+  serializeJson(doc, out);
+  server->send(200, "application/json", out);
+}
+
+// Flash an image already sitting on the SD card, so `scripts_local/wifi-flash.sh`
+// is two ordinary requests: POST /upload to put firmware.bin on the card (the
+// same route that uploads books, no size cap), then this to install it.
+//
+// Deliberately NOT an upload endpoint of its own. Streaming straight into the
+// OTA partition would save one SD write, but it would also mean a second,
+// separately-written path into esp_ota_write that does not share
+// validateImageFile's magic/segment/checksum/SHA/chip/board checks with the SD
+// and OTA paths. One flasher, three callers.
+//
+// Synchronous on purpose: the response IS the result. The flash blocks the
+// server task for a minute or so, which also blocks the UI, and that is the
+// right trade for a dev-build-only tool -- the alternative is a 202 and a
+// caller that has to guess. Point curl at --max-time 300.
+void CrossPointWebServer::handleDevFlash() {
+  if (!devAuthorised()) return;
+  // Defaults to whatever /api/dev/upload just wrote, so the ordinary flow is
+  // upload-then-flash with no path bookkeeping in the caller.
+  const String path = server->hasArg("path") ? server->arg("path") : String(kDevUploadPath);
+
+  const esp_partition_t* dest = esp_ota_get_next_update_partition(nullptr);
+  if (!dest) {
+    LOG_ERR("DEVFLASH", "no OTA partition");
+    server->send(500, "text/plain", "no OTA partition\n");
+    return;
+  }
+
+  LOG_INF("DEVFLASH", "validating %s against '%s' (%u bytes)", path.c_str(), dest->label,
+          static_cast<unsigned>(dest->size));
+  const auto vr = firmware_flash::validateImageFile(path.c_str(), dest->size);
+  if (vr != firmware_flash::Result::OK) {
+    // The name is the diagnosis: TOO_LARGE means this device's table predates
+    // the repartition, WRONG_BOARD means a sticky image on an x4pro, and
+    // OPEN_FAIL means the upload never landed.
+    LOG_ERR("DEVFLASH", "validate %s: %s", path.c_str(), firmware_flash::resultName(vr));
+    server->send(422, "text/plain", String(firmware_flash::resultName(vr)) + "\n");
+    return;
+  }
+
+  LOG_INF("DEVFLASH", "flashing %s -> %s", path.c_str(), dest->label);
+  const auto fr = firmware_flash::flashFromSdPath(path.c_str(), nullptr, nullptr, true);
+  if (fr != firmware_flash::Result::OK) {
+    LOG_ERR("DEVFLASH", "flash failed: %s", firmware_flash::resultName(fr));
+    server->send(500, "text/plain", String(firmware_flash::resultName(fr)) + "\n");
+    return;
+  }
+
+  // Answer before rebooting, or the caller cannot tell success from a device
+  // that fell off the network. send() hands the body to lwIP but does not wait
+  // for the peer's ACK, so give the socket a moment to drain before the reset.
+  LOG_INF("DEVFLASH", "flashed, restarting");
+  server->send(200, "text/plain", "OK flashed, restarting\n");
+#ifndef SIMULATOR
+  server->client().flush();  // the simulator's NetworkClient shim has no flush()
+#endif
+  delay(250);
+  ESP.restart();
 }

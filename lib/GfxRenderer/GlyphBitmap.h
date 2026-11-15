@@ -80,6 +80,43 @@ __attribute__((always_inline)) inline void paint(uint8_t* buffer, int destinatio
     buffer[destination >> 3] |= mask;
 }
 
+// Keep the horizontal byte loop out of the general rasterizer's inline body.
+__attribute__((noinline)) inline void drawMonoHorizontal(const uint8_t* bitmap, int width, const Target& target,
+                                                         Clip clip, bool clearBits, int rowBit, int stepX, int stepY) {
+  for (int y = clip.top; y < clip.bottom; ++y, rowBit += stepY) {
+    int source = y * width + clip.left;
+    int destination = rowBit;
+    int remaining = clip.right - clip.left;
+    while (remaining > 0) {
+      const int offset = destination & 7;
+      const int count = std::min(remaining, stepX > 0 ? 8 - offset : offset + 1);
+      const int sourceOffset = source & 7;
+      uint8_t bits = bitmap[source >> 3] << sourceOffset;
+      // Read the next byte only when kept pixels actually cross into it.
+      if (sourceOffset + count > 8) bits |= bitmap[(source >> 3) + 1] >> (8 - sourceOffset);
+      bits &= static_cast<uint8_t>(0xffu << (8 - count));
+      if (stepX > 0) {
+        bits >>= offset;
+      } else {
+        // Reverse the selected MSB-first pixels for a descending physical row.
+        bits = ((bits & 0x55u) << 1) | ((bits >> 1) & 0x55u);
+        bits = ((bits & 0x33u) << 2) | ((bits >> 2) & 0x33u);
+        bits = (bits << 4) | (bits >> 4);
+        bits <<= 7 - offset;
+      }
+      if (bits) {
+        if (clearBits)
+          target.buffer[destination >> 3] &= static_cast<uint8_t>(~bits);
+        else
+          target.buffer[destination >> 3] |= bits;
+      }
+      source += count;
+      destination += count * stepX;
+      remaining -= count;
+    }
+  }
+}
+
 // Paint a packed glyph into target.
 //
 // bitmap: rows are contiguous, MSB first, 1 or 2 bits per pixel; widths need
@@ -118,6 +155,10 @@ inline void draw(const uint8_t* bitmap, int width, int height, bool twoBit, Plan
   const int stepX = frame.dxY * strideBits + frame.dxX;
   const int stepY = frame.dyY * strideBits + frame.dyX;
   int rowBit = (frame.y - target.originY) * strideBits + frame.x + clip.left * stepX + clip.top * stepY;
+  if (!twoBit && (stepX == 1 || stepX == -1)) {
+    drawMonoHorizontal(bitmap, width, target, clip, clearBits, rowBit, stepX, stepY);
+    return;
+  }
   for (int y = clip.top; y < clip.bottom; ++y, rowBit += stepY) {
     int source = y * width + clip.left;
     int destination = rowBit;

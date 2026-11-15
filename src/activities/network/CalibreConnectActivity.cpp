@@ -6,15 +6,20 @@
 #include <I18n.h>
 #include <WiFi.h>
 
+#include "DevMode.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
+#include "apps_local/ui/NetworkLandscape.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/DeviceHostname.h"
 #include "util/TaskWatchdog.h"
 
 namespace {
-constexpr const char* HOSTNAME = "crosspoint";
+// Per-device, see util/DeviceHostname.h. This advertises THIS reader; the
+// Calibre server it goes looking for is a different name entirely.
 }  // namespace
 
 void CalibreConnectActivity::onEnter() {
@@ -53,9 +58,15 @@ void CalibreConnectActivity::onEnter() {
 void CalibreConnectActivity::onExit() {
   Activity::onExit();
 
+  // Closes the listening socket and any queued client connections; they must go
+  // before the radio teardown below frees the netif they hang off.
+  webServer.reset();
   MDNS.end();
 
-  if (WiFi.getMode() != WIFI_MODE_NULL) {
+  // Not ours to drop if Developer Mode raised it. Every other wifi user here
+  // either tracks its own ownership flag or asks this; a bare getMode() check
+  // means "somebody has the radio", not "I do".
+  if (WiFi.getMode() != WIFI_MODE_NULL && !devmode::holdsRadio()) {
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
@@ -76,9 +87,9 @@ void CalibreConnectActivity::startWebServer() {
   requestUpdate();
 
   MDNS.end();
-  if (MDNS.begin(HOSTNAME)) {
+  if (MDNS.begin(devicehost::mdnsName())) {
     // mDNS is optional for the Calibre plugin but still helpful for users.
-    LOG_DBG("CAL", "mDNS started: http://%s.local/", HOSTNAME);
+    LOG_DBG("CAL", "mDNS started: http://%s.local/", devicehost::mdnsName());
   }
 
   // Heap-critical allocation: SD-font caches retained for the CJK UI fallback
@@ -91,7 +102,7 @@ void CalibreConnectActivity::startWebServer() {
     LOG_DBG("CAL", "Free heap before server alloc: %d bytes", ESP.getFreeHeap());
   }
 
-  webServer.reset(new CrossPointWebServer());
+  webServer.reset(new CrossPointWebServer(CrossPointWebServer::Surface::Full));
   webServer->begin();
 
   if (webServer->isRunning()) {
@@ -179,7 +190,7 @@ void CalibreConnectActivity::render(RenderLock&&) {
 
   renderer.clearScreen();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CALIBRE_WIRELESS));
+  pixelui::drawHeader(renderer, tr(STR_CALIBRE_WIRELESS), I18N.getLanguage() != Language::EN);
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - height) / 2;
 
@@ -188,8 +199,28 @@ void CalibreConnectActivity::render(RenderLock&&) {
   } else if (state == CalibreConnectState::ERROR) {
     renderer.drawCenteredText(UI_12_FONT_ID, top, tr(STR_CONNECTION_FAILED), true, EpdFontFamily::BOLD);
   } else if (state == CalibreConnectState::SERVER_RUNNING) {
-    GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
+    GUI.drawSubHeader(renderer,
+                      Rect{0, pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).header.bottom() + 4,
+                           pageWidth, metrics.tabBarHeight},
                       connectedSSID.c_str(), (std::string(tr(STR_IP_ADDRESS_PREFIX)) + connectedIP).c_str());
+
+    if (pageWidth > pageHeight) {
+      auto target = toybox::makeTarget(renderer);
+      pixelui::bindFonts(target, renderer);
+      const auto layout = networkui::calibreLayout(target.deviceContext(), metrics.tabBarHeight);
+      const bool receiving = lastProgressTotal > 0 && lastProgressReceived <= lastProgressTotal;
+      const bool completed = lastCompleteAt > 0 && (millis() - lastCompleteAt) < 6000;
+      networkui::calibreText(target, layout, receiving, currentUploadName.c_str(),
+                             completed ? lastCompleteName.c_str() : nullptr);
+      if (receiving)
+        GUI.drawProgressBar(renderer,
+                            Rect{layout.progress.x, layout.progress.y, layout.progress.width, layout.progress.height},
+                            lastProgressReceived, lastProgressTotal);
+      const auto labels = mappedInput.mapLabels(tr(STR_EXIT), "", "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      renderer.displayBuffer();
+      return;
+    }
 
     int y = metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing * 4;
     const auto heightText12 = renderer.getTextHeight(UI_12_FONT_ID);

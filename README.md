@@ -1,3 +1,8 @@
+> **Sticky fork:** this branch now uses CrossNext 1.4.0 with AI voice notes, Japanese cards,
+> and custom Readest sync. See [STICKY.md](STICKY.md) for controls/build instructions and
+> [the migration record](docs/research/crossnext-full-port.md) for scope and limitations.
+> Upstream X4 Pro firmware images must not be installed on Sticky.
+
 # CrossPoint Reader
 
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)

@@ -1,6 +1,7 @@
 #pragma once
 #include <Epub.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,13 +35,13 @@ class EpubReaderBookmarksActivity final : public UiListActivity {
 
  private:
   int listCount() const override { return static_cast<int>(bookmarks.size()); }
+  freeink::ui::ButtonProps savedButton;
+  std::atomic<int> savedPageRows{1};
+  void navigateButtons() override;
+  static void onSavedAction(const freeink::ui::ActionEvent& event, void* user);
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
   void onRowLongPress(int index) override;
-#if FREEINK_CAP_TOUCH
-  bool canSwipeDelete(int index) const override { return index >= 0 && index < listCount(); }
-  void swipeDelete(int index) override;
-#endif
   // Popup handling runs before everything else each pass.
   bool handleCustomInput() override;
   // Back cancels with a result; Confirm opens on release and a hold shows actions.

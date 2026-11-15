@@ -5,7 +5,6 @@
 #include <Logging.h>
 
 #include <algorithm>
-#include <cstring>
 
 struct ZipInflateCtx {
   HalFile* file = nullptr;
@@ -17,22 +16,6 @@ struct ZipInflateCtx {
 namespace {
 constexpr uint16_t ZIP_METHOD_STORED = 0;
 constexpr uint16_t ZIP_METHOD_DEFLATED = 8;
-// Central directory header excluding the filename, extra field, and comment.
-constexpr size_t CENTRAL_HEADER_BYTES = 46;
-constexpr uint32_t CENTRAL_HEADER_SIGNATURE = 0x02014b50;
-
-uint16_t readLe16(const uint8_t* bytes) {
-  uint16_t value;
-  // memcpy to avoid unaligned access issues
-  memcpy(&value, bytes, sizeof(value));
-  return value;
-}
-
-uint32_t readLe32(const uint8_t* bytes) {
-  uint32_t value;
-  memcpy(&value, bytes, sizeof(value));
-  return value;
-}
 
 // RAII zip: opens the zip if not already open, closes on destruction only if
 // it performed the open.  Removes the wasOpen/close boilerplate from every method.
@@ -139,77 +122,74 @@ bool ZipFile::loadFileStatSlim(const char* filename, FileStatSlim* fileStat) {
     return false;
   }
 
-  if (lastLookupValid && lastLookupName == filename) {
-    *fileStat = lastLookup;
-    return true;
-  }
-
   const ScopedOpenClose zip{*this};
   if (!zip) return false;
 
   if (!loadZipDetails()) return false;
 
   // Phase 1: Try scanning from cursor position first
-  const uint32_t startPos = lastCentralDirPosValid ? lastCentralDirPos : zipDetails.centralDirOffset;
-  uint32_t entryStart = startPos;
+  uint32_t startPos = lastCentralDirPosValid ? lastCentralDirPos : zipDetails.centralDirOffset;
   bool wrapped = false;
-  file.seek(entryStart);
+  bool found = false;
 
-  const size_t targetLen = strlen(filename);
-  uint8_t header[CENTRAL_HEADER_BYTES];
+  file.seek(startPos);
+
+  uint32_t sig;
   char itemName[256];
 
   while (true) {
-    // stop if we've wrapped and reached our start position
-    if (wrapped && entryStart >= startPos) break;
+    uint32_t entryStart = file.position();
 
-    if (file.read(header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
-        readLe32(header) != CENTRAL_HEADER_SIGNATURE) {
+    if (file.read(&sig, 4) != 4 || sig != 0x02014b50) {
       // End of central directory
-      if (!wrapped && startPos != zipDetails.centralDirOffset) {
+      if (!wrapped && lastCentralDirPosValid && startPos != zipDetails.centralDirOffset) {
         // Wrap around to beginning
-        entryStart = zipDetails.centralDirOffset;
-        file.seek(entryStart);
+        file.seek(zipDetails.centralDirOffset);
         wrapped = true;
         continue;
       }
       break;
     }
 
-    const uint16_t nameLen = readLe16(header + 28);
-    const uint16_t extraLen = readLe16(header + 30);
-    const uint16_t commentLen = readLe16(header + 32);
-    // skip name, extra field + comment
-    const uint32_t nextEntry = entryStart + sizeof(header) + nameLen + extraLen + commentLen;
-
-    // Skip names that are too long or cannot match by length
-    if (nameLen == targetLen && nameLen < sizeof(itemName)) {
-      const int nameRead = file.read(itemName, nameLen);
-      if (nameRead != static_cast<int>(nameLen)) {
-        LOG_ERR("ZIP", "Failed to read entry name for %s: expected %u bytes, got %d", filename,
-                static_cast<unsigned int>(nameLen), nameRead);
-        break;
-      }
-      if (memcmp(itemName, filename, nameLen) == 0) {
-        // Found it! Update cursor to next entry
-        fileStat->method = readLe16(header + 10);
-        fileStat->compressedSize = readLe32(header + 20);
-        fileStat->uncompressedSize = readLe32(header + 24);
-        fileStat->localHeaderOffset = readLe32(header + 42);
-        lastCentralDirPos = nextEntry;
-        lastCentralDirPosValid = true;
-        lastLookupName.assign(filename, nameLen);
-        lastLookup = *fileStat;
-        lastLookupValid = true;
-        return true;
-      }
+    // If we've wrapped and reached our start position, stop
+    if (wrapped && entryStart >= startPos) {
+      break;
     }
 
-    entryStart = nextEntry;
-    file.seek(entryStart);
+    file.seekCur(6);
+    file.read(&fileStat->method, 2);
+    file.seekCur(8);
+    file.read(&fileStat->compressedSize, 4);
+    file.read(&fileStat->uncompressedSize, 4);
+    uint16_t nameLen, m, k;
+    file.read(&nameLen, 2);
+    file.read(&m, 2);
+    file.read(&k, 2);
+    file.seekCur(8);
+    file.read(&fileStat->localHeaderOffset, 4);
+
+    if (nameLen < 256) {
+      file.read(itemName, nameLen);
+      itemName[nameLen] = '\0';
+
+      if (strcmp(itemName, filename) == 0) {
+        // Found it! Update cursor to next entry
+        file.seekCur(m + k);
+        lastCentralDirPos = file.position();
+        lastCentralDirPosValid = true;
+        found = true;
+        break;
+      }
+    } else {
+      // Name too long, skip it
+      file.seekCur(nameLen);
+    }
+
+    // Skip extra field + comment
+    file.seekCur(m + k);
   }
 
-  return false;
+  return found;
 }
 
 long ZipFile::getDataOffset(const FileStatSlim& fileStat) {
@@ -308,8 +288,6 @@ bool ZipFile::close() {
   }
   lastCentralDirPos = 0;
   lastCentralDirPosValid = false;
-  // the archive may change before the next open
-  lastLookupValid = false;
   return true;
 }
 

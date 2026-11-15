@@ -9,6 +9,9 @@
 
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
+#include "RevealedInteractions.h"
+#include "apps_local/ui/LightOptionMenu.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 
@@ -80,7 +83,20 @@ class OptionPopup {
       // Interactions are registered on the render task; only route once the
       // first render after show() has populated the table (uiReady handshake).
       if (uiReady) {
+        // Ask the gate BEFORE routing, not after. A suppressed tap comes back
+        // from routePublished() as a default-constructed event, which is
+        // indistinguishable from "landed on nothing" -- and landing on nothing
+        // is what the outside-tap branch below reads as DISMISS. Falling
+        // through would turn a tap the panel could not have shown into a
+        // dismissal, which is the gate causing a wrong action rather than
+        // preventing one.
+        if (!interactions.publishedRoutable()) return true;
         const freeink::ui::ActionEvent event = interactions.routePublished(snap);
+        if (event && event.action == ACTION_PAGE) {
+          selectedIndex = event.value;
+          requestUpdate();
+          return true;
+        }
         if (event && event.action == ACTION_OPTION) {
           // Tap released on an option: select it, fire, dismiss.
           selectedIndex = event.value;
@@ -167,7 +183,7 @@ class OptionPopup {
     // tracks the live orientation and uiScale fonts; a target held across
     // show() would stale-bind both after a rotation or scale change.
     fui::GfxRendererTarget target = makeUiTarget(renderer);
-    const fui::ThemeTokens& theme = refreshSharedUiThemeTokens(target);
+    refreshSharedUiThemeTokens(target);
     // Frame stores a const DeviceContext&; keep it in a local that outlives
     // the frame (a deviceContext() temporary would dangle).
     const fui::DeviceContext device = target.deviceContext();
@@ -179,9 +195,15 @@ class OptionPopup {
     // publishedData() aren't currently reading, so the loop task never sees
     // this table mid-rebuild — see publish() below and
     // InteractionBuffer::beginPublishCycle().
+    // Before beginPublishCycle() and before the Frame's constructor clears:
+    // the table still published at this moment is the one the panel has been
+    // showing, and that is what the next tap is measured against.
+    interactions.beginBuild();
     interactions.beginPublishCycle();
     fui::Frame<INTERACTION_CAPACITY> frame(target, device, noInput, interactions);
 
+    pixelui::FontScope fonts(target, const_cast<GfxRenderer&>(renderer), I18N.getLanguage() != Language::EN);
+    if (!chrome::lightHeader) target.setFont(pixelui::kSmall, toybox::kTileFontId);
     const auto& metrics = UITheme::getInstance().getMetrics();
     const int totalOptions = static_cast<int>(ownedStrings.size());
     const uint8_t count = static_cast<uint8_t>(totalOptions > MAX_OPTIONS ? MAX_OPTIONS : totalOptions);
@@ -194,12 +216,29 @@ class OptionPopup {
       options[i].state = (i == selectedIndex) ? fui::StateFocused : fui::StateNormal;
     }
 
+    if (chrome::lightHeader) {
+      lightui::ChoiceMenu menu;
+      menu.title = title.c_str();
+      menu.headline = headline.c_str();
+      menu.message = message.c_str();
+      menu.options = options;
+      menu.count = count;
+      menu.current = currentIndex;
+      menu.focus = selectedIndex;
+      menu.guard = ACTION_CHROME;
+      menu.pageAction = ACTION_PAGE;
+      lightui::choiceMenu(frame, device.screen(), menu);
+      interactions.publish();
+      uiReady = true;
+      return;
+    }
+
     fui::OptionDialogProps props;
     props.title = title.empty() ? nullptr : title.c_str();
     props.headline = headline.empty() ? nullptr : headline.c_str();
     if (!message.empty()) {
       props.message = message.c_str();
-      props.messageText.font = fui::GfxRendererTarget::FONT_BODY;
+      props.messageText.font = pixelui::kSmall;
       props.messageText.align = fui::TextAlign::Center;
       props.messageText.maxLines = 6;
     }
@@ -209,36 +248,31 @@ class OptionPopup {
     // Touch only: physical buttons stay on the legacy wrap/confirm path above,
     // so the buffer never competes with it for focus/confirm dispatch.
     props.inputMask = fui::InputTouch;
-    props.titleText.font = fui::GfxRendererTarget::FONT_BODY;
+    props.titleText.font = pixelui::kSmall;
     props.titleText.bold = true;
     props.titleText.align = fui::TextAlign::Center;
     // Captions like "Remove from Recent Books?" overflow the narrow portrait
     // dialog in one line; let them wrap and the panel grow.
     props.titleText.maxLines = 2;
-    props.headlineText.font = fui::GfxRendererTarget::FONT_BODY;
+    props.headlineText.font = pixelui::kSmall;
     props.headlineText.align = fui::TextAlign::Center;
     props.headlineText.maxLines = 3;
     props.buttonText.font = fui::GfxRendererTarget::FONT_BODY;
     const int16_t innerPadding = static_cast<int16_t>(metrics.optionPopupInnerPadding);
     props.padding = fui::Insets{innerPadding, innerPadding, innerPadding, innerPadding};
     props.gap = static_cast<int16_t>(metrics.optionPopupItemSpacing);
-    // Rounded invert-fill themes use a black pill, not the default gray focus cursor.
-    if (theme.listSelectionStyle == fui::SelectionStyle::InvertFill && theme.listRowRadius > 0) {
-      props.buttonStyles = fui::defaultButtonStyles();
-      props.buttonStyles.focused = props.buttonStyles.selected;
-      fui::setStyleRadius(props.buttonStyles, theme.listRowRadius);
-    }
+    props.buttonStyles = pixelui::buttonStyles();
+    props.buttonText.font = pixelui::kSmall;
     // defaultPopupStyles() has no border, so opt in using the per-theme frame metrics.
     props.styles = fui::defaultPopupStyles();
     props.styles.normal.border = fui::Paint::solid(fui::Color::Black);
-    props.styles.normal.borderWidth = static_cast<uint8_t>(metrics.popupFrameThickness);
-    props.styles.normal.radius = static_cast<uint8_t>(metrics.popupCornerRadius);
+    props.styles.normal.borderWidth = pixelui::kBorder;
+    props.styles.normal.radius = 0;
     props.styles.selected = props.styles.normal;
     props.styles.focused = props.styles.normal;
     props.styles.active = props.styles.normal;
     props.styles.disabled = props.styles.normal;
-    props.buttonHeight =
-        fui::clampI16(target.lineHeight(fui::GfxRendererTarget::FONT_BODY) + metrics.optionPopupSelectionVPadding * 2);
+    props.buttonHeight = fui::clampI16(std::max(52, int(target.lineHeight(pixelui::kSmall)) + 12));
 
     // Fixed fraction of the screen, clamped by the theme's side margins; the
     // old max-text-width sizing is gone, long labels wrap inside the buttons.
@@ -268,16 +302,17 @@ class OptionPopup {
   }
 
  private:
-  // The dialog has no scrolling, so options past MAX_OPTIONS would render off
-  // screen anyway; a fixed cap keeps the DialogOption array on the stack and
-  // the interaction table small. +1 slot for the chrome guard rect.
+  // Keep option storage bounded. The light picker pages within this set;
+  // its routing table also reserves a guard and two page controls.
   static constexpr int MAX_OPTIONS = 16;
-  static constexpr size_t INTERACTION_CAPACITY = MAX_OPTIONS + 1;
+  static constexpr size_t INTERACTION_CAPACITY = MAX_OPTIONS + 3;
   static constexpr freeink::ui::ActionId ACTION_OPTION = 1;
   static constexpr freeink::ui::ActionId ACTION_CHROME = 2;
+  static constexpr freeink::ui::ActionId ACTION_PAGE = 3;
 
   void activate(int currentIndex, std::function<void(int)> onSelect) {
     const int count = std::min<int>(ownedStrings.size(), MAX_OPTIONS);
+    this->currentIndex = currentIndex;
     selectedIndex = currentIndex >= 0 && currentIndex < count ? currentIndex : 0;
     onSelectCallback = std::move(onSelect);
     message.clear();
@@ -290,10 +325,10 @@ class OptionPopup {
   std::string headline;
   std::string message;
   std::vector<std::string> ownedStrings;
-  int selectedIndex = 0;
+  int selectedIndex = 0, currentIndex = 0;
   std::function<void(int)> onSelectCallback;
   // Written by the render task (frame registration), routed by the loop task;
   // uiReady closes the rebuild window exactly like UiListActivity::uiReady.
-  mutable freeink::ui::InteractionBuffer<INTERACTION_CAPACITY> interactions;
+  mutable paintclock::RevealedInteractions<INTERACTION_CAPACITY> interactions;
   mutable std::atomic<bool> uiReady{false};
 };

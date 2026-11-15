@@ -38,3 +38,19 @@ class I18n {
 // Convenience macros
 #define tr(id) I18n::getInstance().get(StrId::id)
 #define I18N I18n::getInstance()
+
+// Constant UI catalogues resolve their label at use time, after language changes.
+// Dynamic model text can still pass through as a borrowed C string.
+class UiLabel {
+ public:
+  constexpr UiLabel() = default;
+  constexpr UiLabel(StrId id) : id(id) {}
+  constexpr UiLabel(const char* text) : fallback(text) {}
+  operator const char*() const { return fallback ? fallback : id == StrId::_COUNT ? nullptr : I18N.get(id); }
+  const char* get() const { return static_cast<const char*>(*this); }
+
+ private:
+  StrId id = StrId::_COUNT;
+  const char* fallback = nullptr;
+};
+#define trLabel(id) UiLabel(StrId::id)

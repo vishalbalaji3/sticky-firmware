@@ -21,7 +21,6 @@
 
 #include <cstdint>
 #include <string>
-#include <string_view>
 
 #include "LibraryFormat.h"
 
@@ -68,6 +67,11 @@ struct BuildStats {
 // without building the reader's spine, TOC, CSS, or section caches.
 bool buildLibraryIndex(const char* rootPath, BuildStats& stats, bool readMetadata = false);
 
+enum class CardCheck { Unchanged, Changed, Unavailable };
+// Directory metadata only: no EPUB parse or per-book array. Call once per boot
+// for external card additions; transfers also retain the dirty marker route.
+CardCheck checkLibraryCard(const ClixHeader& header);
+
 // Live index path, shared by the builder and activity.
 const char* libraryIndexPath();
 
@@ -75,9 +79,5 @@ const char* libraryIndexPath();
 // entry rebuilds it through the normal reconciliation path.
 bool markLibraryIndexDirty();
 bool isLibraryIndexDirty();
-
-// Whether `path` (a full path or a bare name) passes the walk's name filter: a
-// book extension, and no hidden or system folder or file name.
-bool isLibraryBookFile(std::string_view path);
 
 }  // namespace library

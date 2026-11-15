@@ -7,9 +7,10 @@
 
 class EpubReaderPercentSelectionActivity final : public Activity, private UiAppHost {
  public:
+  enum class Unit { Percent, ChapterPage };
   // Slider-style percent selector for jumping within a book.
   explicit EpubReaderPercentSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                              int initialPercent);
+                                              int initialPercent, Unit unit = Unit::Percent, int maximum = 100);
 
   void onEnter() override;
   void onExit() override;
@@ -29,6 +30,8 @@ class EpubReaderPercentSelectionActivity final : public Activity, private UiAppH
 
   // Current percent value (0-100) shown on the slider.
   int percent = 0;
+  Unit unit = Unit::Percent;
+  int maximum = 100;
 
   ButtonNavigator buttonNavigator;
 

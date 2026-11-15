@@ -1,171 +1,129 @@
-"""Run with python3 test/test_remote_button_input.py (requires a host C++ compiler)."""
-
+"""Regression for Sticky's short-click injection into native CrossNext input."""
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / "src/MappedInputManager.cpp").read_text()
-# Exercise production frame/dispatch methods with physical input under test control.
-methods = []
-for signature, following in (
-    ("void MappedInputManager::update(", "bool MappedInputManager::isNavDirectionSwapped("),
-    ("bool MappedInputManager::injectRemoteClick(", "bool MappedInputManager::wasLongPressed("),
-    ("bool MappedInputManager::isPressed(", "MappedInputManager::Labels MappedInputManager::mapLabels("),
-):
-    methods.append(signature + source.split(signature, 1)[1].split(following, 1)[0])
+header = (ROOT / "src/MappedInputManager.h").read_text()
 
-stub = r"""
-#pragma once
+def method(signature):
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth = 1
+    end = opening + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
+
+inject = next(line.strip() for line in header.splitlines() if "void injectConfirmClick()" in line)
+harness = r'''
+#include <cassert>
 #include <cstdint>
+#include <algorithm>
+unsigned long millis() { return 1000; }
+enum class HomeButtonAction { Ignore, Confirm };
+struct SideEvent { int action = 0; };
+struct HomeButtonInput {
+  void setWindow(int) {}
+  template<class... T> HomeButtonAction update(T...) { return HomeButtonAction::Ignore; }
+};
 struct HalGPIO {
-  bool pressed = false, released = false, held = false;
-  uint8_t button = 0;
+  enum { BTN_UP, BTN_DOWN };
+  bool released = false, pressed = false;
   void update() {}
-  bool wasAnyPressed() const { return pressed; }
-  bool wasAnyReleased() const { return released; }
-  bool wasPressed(uint8_t b) const { return b == button && pressed; }
-  bool wasReleased(uint8_t b) const { return b == button && released; }
-  bool isPressed(uint8_t b) const { return b == button && held; }
-  unsigned long getHeldTime() const { return 900; }
   bool wasCapacitivePagePressed() const { return false; }
   bool hasHomeKey() const { return false; }
+  bool hasTouch() const { return false; }
   bool wasHomeKeyTapped() const { return false; }
   bool wasHomeKeyLongPressed() const { return false; }
   bool wasHomeKeyPressed() const { return false; }
+  bool wasReleased(uint8_t) const { return released; }
+  bool wasPressed(uint8_t) const { return pressed; }
+  bool wasAnyPressed() const { return pressed; }
+  bool wasAnyReleased() const { return released; }
+  unsigned long getHeldTime() const { return 900; }
 };
-"""
-harness = r"""
-#include <cassert>
-#include "MappedInputManager.h"
-class GfxRenderer {};
-unsigned long millis() { return 1000; }
-constexpr unsigned long TOUCH_HELD_OVERRIDE_WINDOW_MS = 250;
-struct CrossPointSettings {
-  enum { VIBRATION_OFF, VIBRATION_TOUCH_PAGE };
-  enum { IGNORE = 0, PWR_BOOKMARK = 7, PWR_SYNC = 8, PWR_READER_MENU = 9 };
-  int shortPwrBtn = IGNORE;
-  int vibration = VIBRATION_OFF, hapticIntensity = 0;
-  int homeButtonTapAction = 0, homeButtonDoubleTapAction = 0, homeButtonLongPressAction = 0;
-} SETTINGS;
 struct HalHaptics {
   static void feedback(bool, bool, int) {}
   static void longPress(bool, int) {}
 };
-bool MappedInputManager::mapButton(Button b, bool (HalGPIO::*fn)(uint8_t) const) const {
-  return (gpio.*fn)(static_cast<uint8_t>(b));
-}
-bool MappedInputManager::wasBackGesture() const { return false; }
-MappedInputManager::SwipeDir MappedInputManager::wasSwipe(int*, int*) const { return SwipeDir::None; }
-""" + "\n".join(methods) + r"""
+struct CrossPointSettings { enum { VIBRATION_OFF, VIBRATION_TOUCH_PAGE }; };
+struct {
+  int vibration = 0, hapticIntensity = 0, homeButtonDoubleTapTiming = 0;
+  int homeButtonTapAction = 0, homeButtonDoubleTapAction = 0, homeButtonLongPressAction = 0;
+  int sideLeftAction = 0, sideRightAction = 0;
+} SETTINGS;
+SideEvent sideReleasedEvent(int, int, bool, bool) { return {}; }
+HomeButtonAction sideHomeAction(int) { return HomeButtonAction::Ignore; }
+bool sideStandaloneAction(int) { return false; }
+struct MappedInputManager {
+  enum class Button { Back, Confirm, ScreenDown };
+  enum class SwipeDir { None };
+  HalGPIO& gpio;
+  mutable bool stickyConfirmClickFrame = false;
+  mutable HomeButtonAction homeAction = HomeButtonAction::Ignore, deferredHomeAction = HomeButtonAction::Ignore;
+  mutable HomeButtonInput homeButtonInput;
+  struct ReleaseGate { bool swallowsRelease(uint8_t) const { return false; } } releaseGate;
+  mutable SideEvent sideEvent, deferredSideEvent;
+  mutable uint16_t longPressFiredButtons = 0;
+  mutable bool touchHeldOverrideValid = false;
+  unsigned long touchHeldOverrideAt = 0, touchHeldOverrideMs = 0;
+  static constexpr unsigned long TOUCH_HELD_OVERRIDE_WINDOW_MS = 250;
+  void update(bool deferHomeButtonAction = false) const;
+  bool wasPressed(Button) const;
+  bool wasReleased(Button) const;
+  unsigned long getHeldTime() const;
+  SwipeDir wasSwipe() const { return SwipeDir::None; }
+  bool isTouchscreenLocked() const { return false; }
+  void settleReleaseGate() const {}
+  bool isPressed(Button) const { return false; }
+  bool wasBackGesture() const { return false; }
+  bool mapButton(Button b, bool (HalGPIO::*fn)(uint8_t) const) const {
+    return b == Button::Back && (gpio.*fn)(0);
+  }
+INJECT
+};
+''' .replace('INJECT', inject)
+harness += '\n'.join(method(signature) for signature in (
+    'void MappedInputManager::update(',
+    'bool MappedInputManager::wasPressed(',
+    'bool MappedInputManager::wasReleased(',
+    'unsigned long MappedInputManager::getHeldTime(',
+))
+harness += r'''
 int main() {
   HalGPIO gpio;
-  GfxRenderer renderer;
-  MappedInputManager input(gpio, renderer);
+  MappedInputManager input{gpio};
   using Button = MappedInputManager::Button;
-  struct Mapping { RemoteButton remote; Button button; Button other; };
-  for (const auto mapping : {
-      Mapping{RemoteButton::Confirm, Button::Confirm, Button::Back},
-      Mapping{RemoteButton::Back, Button::Back, Button::Confirm},
-      Mapping{RemoteButton::Next, Button::NavNext, Button::NavPrevious},
-      Mapping{RemoteButton::Next, Button::Right, Button::Left},
-      Mapping{RemoteButton::Previous, Button::NavPrevious, Button::NavNext},
-      Mapping{RemoteButton::Previous, Button::Left, Button::Right}}) {
-    const auto remote = mapping.remote;
-    const auto button = mapping.button;
-    const auto other = mapping.other;
-    input.update();
-    assert(input.injectRemoteClick(remote));
-    assert(input.hasRemoteClick());
-    assert(input.wasPressed(button) && input.wasReleased(button));
-    assert(!input.wasPressed(other) && !input.wasReleased(other));
-    assert(!input.isPressed(button) && input.getHeldTime() == 0);
-    assert(!input.injectRemoteClick(remote));
-    input.update();
-    assert(!input.hasRemoteClick());
-    assert(!input.wasPressed(button) && !input.wasReleased(button));
-    assert(input.getHeldTime() == 900);
-  }
-  // Physical edges and held Confirm/Back must win over a simultaneous remote click.
-  gpio.pressed = true;
-  assert(!input.injectRemoteClick(RemoteButton::Confirm));
-  gpio.pressed = false;
-  gpio.released = true;
-  assert(!input.injectRemoteClick(RemoteButton::Back));
-  gpio.released = false;
-  gpio.held = true;
-  for (Button button : {Button::Confirm, Button::Back}) {
-    gpio.button = static_cast<uint8_t>(button);
-    assert(!input.injectRemoteClick(RemoteButton::Confirm));
-    assert(!input.injectRemoteClick(RemoteButton::Back));
-  }
-  gpio.held = false;
-  assert(input.injectRemoteClick(RemoteButton::Back));
-}
-"""
-manager_source = (ROOT / "src/activities/ActivityManager.cpp").read_text()
-remote_turn = "bool ActivityManager::remoteTurn(" + manager_source.split(
-    "bool ActivityManager::remoteTurn(", 1
-)[1].split("bool ActivityManager::handleForcedRefresh()", 1)[0]
-harness = harness.replace("int main() {", r"""
-#include <atomic>
-#include <memory>
-#include "activities/reader/RemoteTurnGate.h"
-struct RenderLock { static bool peek() { return false; } };
-struct ReaderActivity {
-  std::atomic<bool> pageRendered{true};
-  bool menu = false;
-  int pages = 0, chapters = 0;
-  bool inputOverPage() const { return menu; }
-  bool pageTurn(bool forward) { pages += forward ? 1 : -1; return true; }
-  bool skipPages(int step) { chapters += step; return true; }
-};
-struct ActivityManager {
-  MappedInputManager& mappedInput;
-  std::unique_ptr<ReaderActivity> currentActivity = std::make_unique<ReaderActivity>();
-  bool context = true, foregroundReader = true;
-  bool isRemoteReaderContext() const { return context; }
-  bool isForegroundReader() const { return foregroundReader; }
-  bool remoteClick(RemoteButton button) { return mappedInput.injectRemoteClick(button); }
-  void requestUpdate() {}
-  bool remoteTurn(bool forward, bool chapter);
-};
-""" + remote_turn + r"""
-void checkRouting(MappedInputManager& input) {
-  ActivityManager manager{input};
   input.update();
-  assert(manager.remoteTurn(true, false));
-  assert(manager.currentActivity->pages == 1 && !input.hasRemoteClick());
-  for (bool reader : {true, false}) {
-    manager.foregroundReader = reader;
-    manager.currentActivity->menu = true;
-    for (bool forward : {true, false}) {
-      input.update();
-      assert(manager.remoteTurn(forward, false));
-      assert(input.wasPressed(forward ? MappedInputManager::Button::NavNext
-                                     : MappedInputManager::Button::NavPrevious));
-      assert(manager.currentActivity->pages == 1);
-      assert(!manager.remoteTurn(forward, false));
-    }
-    input.update();
-    assert(!manager.remoteTurn(true, true));
-    assert(manager.currentActivity->chapters == 0 && !input.hasRemoteClick());
-  }
-  manager.context = false;
-  assert(!manager.remoteTurn(true, false));
+  assert(!input.wasPressed(Button::Confirm) && !input.wasReleased(Button::Confirm));
+  input.injectConfirmClick();
+  assert(input.wasPressed(Button::Confirm) && input.wasReleased(Button::Confirm));
+  assert(!input.isPressed(Button::Confirm) && input.getHeldTime() == 0);
+  assert(!input.wasPressed(Button::Back) && !input.wasReleased(Button::Back));
+  input.update();
+  assert(!input.wasPressed(Button::Confirm) && !input.wasReleased(Button::Confirm));
+  assert(input.getHeldTime() == 900);
+  // Native physical and home actions are still delivered independently.
+  gpio.released = true;
+  assert(input.wasReleased(Button::Back));
+  assert(!input.wasReleased(Button::Confirm));
+  input.homeAction = HomeButtonAction::Confirm;
+  assert(input.wasReleased(Button::Confirm) && input.getHeldTime() == 0);
 }
-int main() {
-""")
-harness = harness.replace("  using Button =", "  checkRouting(input);\n  using Button =")
+'''
 with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
-    (directory / "HalGPIO.h").write_text(stub)
-    cpp = directory / "remote_input.cpp"
-    executable = directory / "remote_input"
-    cpp.write_text("#include <initializer_list>\n" + harness)
-    subprocess.run([
-        "c++", "-std=c++20", "-DFREEINK_CAP_TOUCH=0", "-I", str(directory),
-        "-I", str(ROOT / "src"), str(cpp), "-o", str(executable),
-    ], check=True)
+    cpp = directory / 'sticky_confirm.cpp'
+    cpp.write_text(harness)
+    executable = directory / 'sticky_confirm'
+    subprocess.run(['c++', '-std=c++20', '-DFREEINK_CAP_TOUCH=0', str(cpp), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
-print("Remote button input regression checks passed")
+print('Sticky Confirm frame regression passed')
+
+# A USB/flash reset must reach the UI and serial test bridge on Sticky.
+main_source = (ROOT / "src/main.cpp").read_text()
+usb_branch = main_source.split("case HalGPIO::WakeupReason::AfterUSBPower:", 1)[1].split("case HalGPIO::WakeupReason::AfterFlash:", 1)[0]
+assert "#if FREEINK_DEVICE_STICKY ||" in usb_branch

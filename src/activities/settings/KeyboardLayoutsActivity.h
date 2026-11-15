@@ -10,7 +10,7 @@ class MappedInputManager;
 class KeyboardLayoutsActivity final : public UiListActivity {
  public:
   explicit KeyboardLayoutsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : UiListActivity("KeyboardLayouts", renderer, mappedInput) {}
+      : UiListActivity("KeyboardLayouts", renderer, mappedInput, false, true) {}
 
   void onEnter() override;
   void onExit() override;

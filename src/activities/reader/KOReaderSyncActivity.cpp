@@ -12,6 +12,7 @@
 #include <cassert>
 
 #include "AutoProgressSync.h"
+#include "DevMode.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
@@ -28,8 +29,6 @@
 #include "fontIds.h"
 #include "network/SavedWifi.h"
 #include "network/WifiPowerSaveGuard.h"
-#include "util/PluginEvents.h"
-#include "util/PluginHttp.h"
 
 namespace fui = freeink::ui;
 
@@ -92,7 +91,14 @@ void KOReaderSyncActivity::saveProgressAndReturn(int spineIndex, int page) {
   if (remotePosition.hasVisibleTextOffset && remotePosition.spineIndex == spineIndex) {
     offset = remotePosition.visibleTextOffset;
   }
-  if (!EpubReaderUtils::saveProgress(*epub, spineIndex, page, 0, offset)) {
+#ifdef FREEINK_DEVICE_STICKY
+  const readingsync::State accepted{autosync::syncScope(documentHash), remoteProgress.revision.value_or(0),
+                                    remoteProgress.revision.has_value(), false};
+  const bool saved = EpubReaderUtils::saveProgress(*epub, spineIndex, page, 0, offset, &accepted);
+#else
+  const bool saved = EpubReaderUtils::saveProgress(*epub, spineIndex, page, 0, offset);
+#endif
+  if (!saved) {
     failSync(tr(STR_SAVE_PROGRESS_FAILED));
     return;
   }
@@ -150,19 +156,6 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   // stalls that surface as HTTP timeouts. WiFi is torn down when this activity exits.
   WiFi.setSleep(false);
   LOG_DBG("KOSync", "WiFi sleep disabled for sync");
-
-  if (pluginEventsOnly) {
-    {
-      RenderLock lock(*this);
-      state = SYNCING;
-      statusMessage = tr(STR_SYNC_PROGRESS);
-    }
-    requestUpdate(true);
-
-    pluginevents::drain(&renderer);
-    completeAlreadySynced();
-    return;
-  }
 
   {
     RenderLock lock(*this);
@@ -222,6 +215,7 @@ void KOReaderSyncActivity::performSync() {
 
   KOReaderProgress alternateProgress;
   bool hasAlternateProgress = false;
+#ifndef FREEINK_DEVICE_STICKY
   if (smartSyncEnabled()) {
     const DocumentMatchMethod altMethod = alternateMatchMethod(primaryMethod);
     const std::string altHash = calculateDocumentHashForMethod(epubPath, altMethod);
@@ -239,6 +233,7 @@ void KOReaderSyncActivity::performSync() {
     }
   }
 
+#endif
   if (result == KOReaderSyncClient::NOT_FOUND && hasAlternateProgress) {
     remoteProgress = std::move(alternateProgress);
     hasAlternateProgress = false;
@@ -246,6 +241,7 @@ void KOReaderSyncActivity::performSync() {
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {
+#ifndef FREEINK_DEVICE_STICKY
     if (smartSyncEnabled() || automatic) {
       LOG_DBG("KOSync", "Smart sync: no remote progress found for known document hashes; uploading local %.6f",
               localProgress.percentage);
@@ -253,6 +249,8 @@ void KOReaderSyncActivity::performSync() {
       return;
     }
 
+#endif
+    remoteProgress.revision = 0;
     // No remote progress - offer to upload
     {
       RenderLock lock(*this);
@@ -313,6 +311,26 @@ void KOReaderSyncActivity::performSync() {
 
   const ProgressComparison comparison =
       compareProgress(localPosition, localProgress.percentage, remotePosition, remoteProgress.percentage);
+#ifdef FREEINK_DEVICE_STICKY
+  if (smartSyncEnabled() || automatic) {
+    const auto localState = EpubReaderUtils::loadSyncState(*epub);
+    const auto decision =
+        readingsync::reconcile(localState, autosync::syncScope(documentHash), remoteProgress.revision);
+    switch (decision) {
+      case readingsync::Decision::Download:
+        saveProgressAndReturn(remotePosition.spineIndex, remotePosition.pageNumber);
+        return;
+      case readingsync::Decision::Upload:
+        performUpload();
+        return;
+      case readingsync::Decision::Keep:
+        completeAlreadySynced();
+        return;
+      case readingsync::Decision::Choose:
+        break;
+    }
+  }
+#else
   if (smartSyncEnabled() || automatic) {
     LOG_DBG("KOSync", "Smart decision: doc=%s result=%d local=%.6f remote=%.6f remoteXpath=%s mapped=%d/%d",
             primaryHash.c_str(), static_cast<int>(comparison), localProgress.percentage, remoteProgress.percentage,
@@ -335,6 +353,7 @@ void KOReaderSyncActivity::performSync() {
     }
   }
 
+#endif
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   {
     RenderLock lock(*this);
@@ -356,10 +375,22 @@ void KOReaderSyncActivity::performUpload() {
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   // The Epub is only reloaded on the remote-progress path (performSync), so
   // reload it here for the title/author metadata.
+#ifdef FREEINK_DEVICE_STICKY
+  ensureEpubLoaded();
+  if (!epub) {
+    failSync("");
+    return;
+  }
+#else
   if (KOREADER_STORE.getSendMetadata()) ensureEpubLoaded();
-  const KOReaderProgress progress =
+#endif
+  KOReaderProgress progress =
       autosync::buildUploadProgress(documentHash, localProgress, localPosition, epub.get(), epubPath);
 
+#ifdef FREEINK_DEVICE_STICKY
+  progress.revision = remoteProgress.revision;
+#endif
+  std::optional<uint64_t> savedRevision;
   // Release the Epub before the network call so the TLS handshake has enough free heap
   // (consistent with the release-before-sync pattern in performSync); nothing below needs it.
   epub.reset();
@@ -368,17 +399,28 @@ void KOReaderSyncActivity::performUpload() {
   {
     // Restore power-save before esp_wifi_stop below; set_ps on a stopped radio fails.
     WifiPowerSaveGuard psGuard;
-    result = KOReaderSyncClient::updateProgress(progress);
+    result = KOReaderSyncClient::updateProgress(progress, &savedRevision);
   }
 
   // Drop the radio while user reads the result; full teardown happens at silent reboot.
-  esp_wifi_stop();
+  // Not if Developer Mode raised it: esp_wifi_stop() is unambiguous -- the radio
+  // is off for everyone, including a connection this screen did not make.
+  if (!devmode::holdsRadio()) esp_wifi_stop();
 
   if (result != KOReaderSyncClient::OK) {
     failSync(KOReaderSyncClient::errorString(result));
     return;
   }
 
+#ifdef FREEINK_DEVICE_STICKY
+  ensureEpubLoaded();
+  const readingsync::State accepted{autosync::syncScope(documentHash), savedRevision.value_or(0),
+                                    savedRevision.has_value(), false};
+  if (!epub || !EpubReaderUtils::saveSyncState(*epub, accepted)) {
+    failSync(tr(STR_SAVE_PROGRESS_FAILED));
+    return;
+  }
+#endif
   autosync::record(epubPath, true);
   if (automatic) {
     returnToReader();
@@ -400,8 +442,8 @@ void KOReaderSyncActivity::onEnter() {
   app.on(ACTION_ROW, &KOReaderSyncActivity::onResultRow, this);
   app.setScreen(&KOReaderSyncActivity::resultScreen, this);
 
-  // Check for credentials first (plugin-events-only mode needs none).
-  if (!pluginEventsOnly && !KOREADER_STORE.hasCredentials()) {
+  // Check for credentials first
+  if (!KOREADER_STORE.hasCredentials()) {
     state = NO_CREDENTIALS;
     requestUpdate();
     return;
@@ -431,7 +473,7 @@ void KOReaderSyncActivity::onEnter() {
 void KOReaderSyncActivity::onExit() {
   Activity::onExit();
 
-  if (wifiActivated) {
+  if (wifiActivated && !devmode::holdsRadio()) {
     if (automatic) {
       stopWifi();  // the reader must reopen without a reboot
       return;
@@ -623,9 +665,10 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   if (automatic && state != SHOWING_RESULT) return;
   renderer.clearScreen();
 
+  auto metrics = UITheme::getInstance().getMetrics();
   Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  GUI.drawHeader(renderer, UITheme::getInstance().getHeaderRect(renderer, true, false),
+  GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
                  state == SHOWING_RESULT ? tr(STR_PROGRESS_FOUND) : tr(STR_KOREADER_SYNC));
 
   int top = screen.y + screen.height / 2 - 40;

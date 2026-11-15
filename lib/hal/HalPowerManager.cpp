@@ -1,6 +1,7 @@
 #include "HalPowerManager.h"
 
 #include <BoardConfig.h>
+#include <HalFrontlight.h>
 #include <Logging.h>
 #include <PowerManager.h>
 #include <WiFi.h>
@@ -13,10 +14,6 @@
 
 #include "HalGPIO.h"
 #include "I2cBusRecovery.h"
-
-#if FREEINK_DEVICE_EEGO_A4 || FREEINK_DEVICE_PICCO
-#include <HalFrontlight.h>
-#endif
 
 #if FREEINK_DEVICE_PAPERMONO
 #include <M5Pm1.h>
@@ -84,9 +81,6 @@ void HalPowerManager::begin() {
     pinMode(BoardConfig::ACTIVE.batteryAdc, INPUT);
   }
   recoverGaugeBus();
-  // Board charger setup (Picco SGM41562: stock charge voltage and limits); a
-  // no-op on boards without a configurable charger.
-  if (BatteryMonitor::configureCharger()) LOG_INF("PWR", "Charger configured");
   normalFreq = getCpuFrequencyMhz();
   modeMutex = xSemaphoreCreateMutex();
   assert(modeMutex != nullptr);
@@ -131,11 +125,10 @@ void HalPowerManager::setPowerSaving(bool enabled) {
   xSemaphoreGive(modeMutex);
 }
 
-void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool wakeOnHeldButton) const {
-#if FREEINK_DEVICE_EEGO_A4 || FREEINK_DEVICE_PICCO
-  // The frontlight driver and touch share I2C; turn the light off before touch
-  // releases the bus. On Picco this also puts the TMA525C to sleep.
-  Frontlight.setOn(false);
+[[noreturn]] void HalPowerManager::startDeepSleep(HalGPIO& gpio, const uint64_t timerWakeMicros) const {
+  Frontlight.prepareForDeepSleep();
+#if FREEINK_DEVICE_EEGO_A4
+  // LM3630A and GSL share I2C; turn the light off before touch releases the bus.
   gpio.prepareForDeepSleep();
 #endif
 #ifdef ENABLE_SERIAL_LOG
@@ -177,7 +170,7 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool wakeOnHeldButton)
     // drive below (same trap as the GPIO13 block above).
     gpio_hold_dis(g);
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, HIGH);
+    digitalWrite(pin, powerOffRequested ? LOW : HIGH);
     gpio_hold_en(g);
   }
 
@@ -199,56 +192,19 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool wakeOnHeldButton)
   }
 #endif
 #if FREEINK_DEVICE_METALIO_EINK4
-  // Deep sleep leaves the board, 4G modem and audio module powered, so cut
-  // power instead; the button cold-boots it. Returns only on USB power.
-  freeink::metalio::powerOff();
+  // ESP deep sleep leaves the whole board powered (main and screen/SD rails,
+  // 4G modem, audio module). Pulse the power-switch chip the way the vendor
+  // firmware does; the power button then cold-boots. USB can keep the board
+  // alive, so fall through to deep sleep if power is still on.
+  for (int i = 0; i < 3; i++) {
+    freeink::metalio::powerOff();
+  }
 #endif
 
-  if (wakeOnHeldButton) {
-    freeink::PowerManager::armPowerButtonWakeup();
-    freeink::PowerManager::deepSleep();
-  }
   // Waits for the power button to be physically released (so holding it doesn't
   // immediately wake the device again), then arms the wake source and sleeps.
-  freeink::PowerManager::deepSleepUntilPowerButton();
+  freeink::PowerManager::deepSleepUntilPowerButtonOrTimer(powerOffRequested ? 0 : timerWakeMicros);
 }
-
-#if FREEINK_DEVICE_PICCO
-// ponytail: 30 s poll; the SGM41562 status is I2C-only, so USB unplug and
-// charge progress are only seen when the timer fires.
-static constexpr uint64_t USB_HOLD_POLL_US = 30ULL * 1000 * 1000;
-
-bool HalPowerManager::holdWhileUsbPowered(HalGPIO& gpio, void (*onStatus)(bool charging, uint16_t percent)) const {
-  if (!gpio.isUsbConnected()) return false;
-  LOG_DBG("PWR", "USB power present, holding in light sleep");
-  const auto powerPin = static_cast<gpio_num_t>(BoardConfig::ACTIVE.input.power);
-  // The press that requested sleep may still be down; it must not end the hold.
-  while (digitalRead(powerPin) == LOW) delay(10);  // Picco power button is active-low
-  const BatteryMonitor battery;
-  int lastCharging = -1;
-  int lastPercent = -1;
-  while (gpio.isUsbConnected()) {
-    const bool charging = battery.isCharging();
-    const uint16_t percent = getBatteryPercentage();
-    if (static_cast<int>(charging) != lastCharging || percent != lastPercent) {
-      lastCharging = charging;
-      lastPercent = percent;
-      onStatus(charging, percent);
-    }
-    esp_sleep_enable_timer_wakeup(USB_HOLD_POLL_US);
-    gpio_wakeup_enable(powerPin, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-    esp_light_sleep_start();
-    gpio_wakeup_disable(powerPin);
-    // gpio_wakeup_disable() keeps the LOW_LEVEL type, and a later pinMode() would
-    // enable it as an interrupt that storms while the button is held.
-    gpio_set_intr_type(powerPin, GPIO_INTR_DISABLE);
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-    if (digitalRead(powerPin) == LOW) return true;
-  }
-  return false;
-}
-#endif
 
 bool HalPowerManager::isBatteryPercentageKnown() const {
   return BoardConfig::ACTIVE.batteryGauge.gaugeAddr == 0 || _batteryPercentKnown;

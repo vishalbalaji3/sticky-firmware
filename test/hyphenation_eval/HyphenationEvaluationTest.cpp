@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lib/Epub/Epub/hyphenation/HyphenationCommon.h"
+#include "lib/Epub/Epub/hyphenation/Hyphenator.h"
 #include "lib/Epub/Epub/hyphenation/LanguageHyphenator.h"
 #include "lib/Epub/Epub/hyphenation/LanguageRegistry.h"
 
@@ -225,11 +226,78 @@ void runLanguageEval(const char* langName, const char* primaryTag, const char* r
 }  // namespace
 
 TEST(HyphenationEval, English) { runLanguageEval("english", "en", "english_hyphenation_tests.txt", 98.10); }
-TEST(HyphenationEval, French) { runLanguageEval("french", "fr", "french_hyphenation_tests.txt", 99.00); }
-TEST(HyphenationEval, German) { runLanguageEval("german", "de", "german_hyphenation_tests.txt", 96.73); }
-TEST(HyphenationEval, Russian) { runLanguageEval("russian", "ru", "russian_hyphenation_tests.txt", 96.22); }
 TEST(HyphenationEval, Spanish) { runLanguageEval("spanish", "es", "spanish_hyphenation_tests.txt", 98.02); }
-TEST(HyphenationEval, Italian) { runLanguageEval("italian", "it", "italian_hyphenation_tests.txt", 98.99); }
-TEST(HyphenationEval, Polish) { runLanguageEval("polish", "pl", "polish_hyphenation_tests.txt", 98.92); }
-TEST(HyphenationEval, Swedish) { runLanguageEval("swedish", "sv", "swedish_hyphenation_tests.txt", 94.01); }
-TEST(HyphenationEval, Portuguese) { runLanguageEval("portuguese", "pt", "portuguese_hyphenation_tests.txt", 98.21); }
+
+TEST(HyphenationResources, OnlyEnglishAndSpanishPatterns) {
+  EXPECT_EQ(getLanguageEntries().size, 2u);
+  EXPECT_NE(getLanguageHyphenatorForPrimaryTag("en"), nullptr);
+  EXPECT_NE(getLanguageHyphenatorForPrimaryTag("es"), nullptr);
+  for (const char* tag : {"de", "fi", "fr", "it", "pl", "pt", "ru", "sv", "uk"}) {
+    EXPECT_EQ(getLanguageHyphenatorForPrimaryTag(tag), nullptr) << tag;
+  }
+}
+
+TEST(HyphenationResources, RegionalAndThreeLetterTagsKeepPatterns) {
+  for (const char* tag : {"en-US", "ENG", "es_ES", "SPA"}) {
+    Hyphenator::setPreferredLanguage(tag);
+    EXPECT_FALSE(Hyphenator::breakOffsets("extraordinario", false).empty()) << tag;
+  }
+  Hyphenator::setPreferredLanguage("");
+}
+
+TEST(HyphenationResources, UnsupportedLanguageClearsPreviousPatternsAndStillWraps) {
+  Hyphenator::setPreferredLanguage("en");
+  ASSERT_FALSE(Hyphenator::breakOffsets("extraordinario", false).empty());
+  Hyphenator::setPreferredLanguage("de-DE");
+  EXPECT_TRUE(Hyphenator::breakOffsets("extraordinario", false).empty());
+  EXPECT_FALSE(Hyphenator::breakOffsets("extraordinario", true).empty());
+  const auto hard = Hyphenator::breakOffsets("vor-lesen", false);
+  ASSERT_EQ(hard.size(), 1u);
+  EXPECT_EQ(hard[0].byteOffset, 4u);
+  EXPECT_FALSE(hard[0].requiresInsertedHyphen);
+  const auto soft = Hyphenator::breakOffsets("vor\u00ADlesen", false);
+  ASSERT_EQ(soft.size(), 1u);
+  EXPECT_EQ(soft[0].byteOffset, 5u);
+  EXPECT_TRUE(soft[0].requiresInsertedHyphen);
+  Hyphenator::setPreferredLanguage("");
+}
+
+TEST(HyphenationResources, UnsupportedApostropheWordsKeepEmergencySegmentBreaks) {
+  for (const char* tag : {"fr-FR", "it-IT"}) {
+    Hyphenator::setPreferredLanguage(tag);
+    for (const std::string word :
+         {"l'anticonstitutionnellement", "l'internazionalizzazione", "l\u2019internationalisation"}) {
+      EXPECT_TRUE(Hyphenator::breakOffsets(word, false).empty());
+      const auto breaks = Hyphenator::breakOffsets(word, true);
+      ASSERT_FALSE(breaks.empty()) << tag << ": " << word;
+      for (const auto& point : breaks) {
+        EXPECT_GE(point.byteOffset, 4u);
+        ASSERT_LT(point.byteOffset, word.size());
+        EXPECT_NE(static_cast<unsigned char>(word[point.byteOffset]) & 0xC0, 0x80);
+        EXPECT_TRUE(point.requiresInsertedHyphen);
+      }
+    }
+  }
+  Hyphenator::setPreferredLanguage("");
+}
+
+TEST(HyphenationResources, UnsupportedCompoundsKeepEmergencyBreaksBeforeExplicitHyphens) {
+  for (const char* tag : {"de-DE", "fr-FR"}) {
+    Hyphenator::setPreferredLanguage(tag);
+    for (const std::string word : {"Datenschutzgrund\u00ADverordnung", "anticonstitutionnellement-quelquechose",
+                                   "l'anticonstitutionnellement-quelquechose"}) {
+      const auto explicitBreaks = Hyphenator::breakOffsets(word, false);
+      ASSERT_FALSE(explicitBreaks.empty());
+      const auto emergency = Hyphenator::breakOffsets(word, true);
+      ASSERT_FALSE(emergency.empty());
+      EXPECT_LT(emergency.front().byteOffset, explicitBreaks.front().byteOffset);
+      for (const auto& original : explicitBreaks) {
+        EXPECT_TRUE(std::any_of(emergency.begin(), emergency.end(), [&](const auto& point) {
+          return point.byteOffset == original.byteOffset &&
+                 point.requiresInsertedHyphen == original.requiresInsertedHyphen;
+        }));
+      }
+    }
+  }
+  Hyphenator::setPreferredLanguage("");
+}

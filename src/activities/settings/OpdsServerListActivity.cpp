@@ -14,6 +14,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/browser/OpdsBookBrowserActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "util/OpdsFilename.h"
 
@@ -54,7 +55,7 @@ int OpdsServerListActivity::getItemCount() const {
 
 OpdsServerListActivity::OpdsServerListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                const bool pickerMode)
-    : UiListActivity("OpdsServerList", renderer, mappedInput), pickerMode(pickerMode) {}
+    : UiListActivity("OpdsServerList", renderer, mappedInput, false, true), pickerMode(pickerMode) {}
 
 void OpdsServerListActivity::onEnter() {
   UiListActivity::onEnter();
@@ -198,16 +199,12 @@ void OpdsServerListActivity::handleSelection() {
 }
 
 void OpdsServerListActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, true);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
   // Content below the GUI.drawHeader band, above the button hints; derived
   // from the safe area so board bezel insets apply (same as LanguageSelect).
-  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  screen.setContentMarginFromScreen(
-      fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
-                  static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
-                  static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) + metrics.buttonHintsHeight),
-                  static_cast<int16_t>(safe.x)});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  pixelui::begin(screen, mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
 
   const int itemCount = getItemCount();
   if (itemCount == 0) {
@@ -232,7 +229,7 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }
 
 void OpdsServerListActivity::render(RenderLock&& lock) {

@@ -39,14 +39,16 @@ struct Rect {
 };
 
 void compare(int orientation, int rotation, bool twoBit, Plane plane, bool state, int width, int height, int x, int y,
-             int originY, int rows, Rect clip) {
+             int originY, int rows, Rect clip, int pattern = -1) {
   SCOPED_TRACE(::testing::Message() << orientation << ',' << rotation << ',' << twoBit << ',' << static_cast<int>(plane)
                                     << ',' << state << " size=" << width << 'x' << height << " at=" << x << ',' << y
                                     << " band=" << originY << ',' << rows);
   const auto [dxX, dxY, dyX, dyY] = AXES[rotation];
   const glyphBitmap::Frame logical{x, y, dxX, dxY, dyX, dyY};
   std::vector<uint8_t> bitmap((width * height * (twoBit ? 2 : 1) + 7) / 8);
-  for (size_t i = 0; i < bitmap.size(); ++i) bitmap[i] = static_cast<uint8_t>(i * 73 + 0x1b);
+  for (size_t i = 0; i < bitmap.size(); ++i) {
+    bitmap[i] = static_cast<uint8_t>(pattern < 0 ? i * 73 + 0x1b : pattern);
+  }
   // Nonuniform background and guards verify transparent pixels and all off-band bytes.
   std::vector<uint8_t> expected(rows * STRIDE + 32);
   for (size_t i = 0; i < expected.size(); ++i) expected[i] = static_cast<uint8_t>(i * 53 + 0xa5);
@@ -121,6 +123,26 @@ TEST(GlyphBitmap, EmptyAndFullyClippedGlyphsDoNotWrite) {
       compare(orientation, rotation, true, Plane::BW, true, 0, 0, 0, 0, 0, 32, {0, 0, 40, 32});
       compare(orientation, rotation, true, Plane::BW, true, 11, 9, 100, 100, 0, 32, {0, 0, 40, 32});
       compare(orientation, rotation, true, Plane::BW, true, 11, 9, 0, 0, 0, 32, {12, 10, 15, 20});
+    }
+  }
+}
+
+TEST(GlyphBitmap, MonochromeByteMasksPreserveAlignmentClipsAndTransparentBits) {
+  for (int orientation = 0; orientation < 4; ++orientation) {
+    for (int rotation = 0; rotation < 2; ++rotation) {
+      for (bool state : {false, true}) {
+        for (int width = 1; width <= 33; ++width) {
+          for (int offset = 0; offset < 8; ++offset) {
+            for (int pattern : {0x00, 0xff, 0x01, 0x80, 0xaa, 0x55, -1}) {
+              compare(orientation, rotation, false, Plane::BW, state, width, 3, offset, offset, 0, PANEL_HEIGHT,
+                      {2, 1, 29, 26}, pattern);
+              // Exact-sized source ends in a partial byte; ASan detects speculative tail reads.
+              compare(orientation, rotation, false, Plane::GrayMSB, state, width, 1, offset, offset, 0, PANEL_HEIGHT,
+                      {-20, -20, 60, 60}, pattern);
+            }
+          }
+        }
+      }
     }
   }
 }

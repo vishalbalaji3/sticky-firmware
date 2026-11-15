@@ -22,6 +22,10 @@ class HalClock {
   // Call after BoardConfig has selected the active device.
   void begin();
 
+  bool available() const { return _available; }
+  // Raw hardware-RTC readout, uncached; diagnostics (the dev bridge's DATE).
+  bool raw(Rtc::DateTime& dt) const { return _available && _sdkRtc.now(dt); }
+
   // True if an RTC is present on this device
   bool isAvailable() const { return _available; }
 
@@ -50,4 +54,7 @@ class HalClock {
   // Debouncing (skip if already synced once) is enforced by the caller, not here,
   // so the HAL stays free of any app-layer settings dependency.
   bool syncFromNTP();
+
+  // Commit a validated local wall time under the current timezone; no network.
+  bool setLocalTime(const struct tm& value);
 };

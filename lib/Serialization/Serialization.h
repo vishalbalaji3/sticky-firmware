@@ -11,7 +11,7 @@ void writePod(std::ostream& os, const T& value) {
 }
 
 template <typename T>
-void writePod(HalFile& file, const T& value) {
+void writePod(Print& file, const T& value) {
   file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
 }
 
@@ -41,7 +41,7 @@ inline void writeString(std::ostream& os, const std::string& s) {
   os.write(s.data(), len);
 }
 
-inline void writeString(HalFile& file, const std::string& s) {
+inline void writeString(Print& file, const std::string& s) {
   const uint32_t len = s.size();
   writePod(file, len);
   file.write(reinterpret_cast<const uint8_t*>(s.data()), len);

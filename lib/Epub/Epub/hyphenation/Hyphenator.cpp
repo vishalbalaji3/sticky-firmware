@@ -84,7 +84,7 @@ std::vector<Hyphenator::BreakInfo> buildExplicitBreakInfos(const std::vector<Cod
 
 bool isSegmentSeparator(const uint32_t cp) { return isExplicitHyphen(cp) || isApostrophe(cp); }
 
-void appendSegmentPatternBreaks(const std::vector<CodepointInfo>& cps, const LanguageHyphenator& hyphenator,
+void appendSegmentPatternBreaks(const std::vector<CodepointInfo>& cps, const LanguageHyphenator* hyphenator,
                                 const bool includeFallback, std::vector<Hyphenator::BreakInfo>& outBreaks) {
   size_t segStart = 0;
 
@@ -96,20 +96,26 @@ void appendSegmentPatternBreaks(const std::vector<CodepointInfo>& cps, const Lan
     }
 
     if (i > segStart) {
-      std::vector<CodepointInfo> segment(cps.begin() + segStart, cps.begin() + i);
-      auto segIndexes = hyphenator.breakIndexes(segment);
+      const size_t segmentSize = i - segStart;
+      std::vector<size_t> segIndexes;
+      if (hyphenator) {
+        const std::vector<CodepointInfo> segment(cps.begin() + segStart, cps.begin() + i);
+        segIndexes = hyphenator->breakIndexes(segment);
+      }
 
       if (includeFallback && segIndexes.empty()) {
-        const size_t minPrefix = hyphenator.minPrefix();
-        const size_t minSuffix = hyphenator.minSuffix();
-        for (size_t idx = minPrefix; idx + minSuffix <= segment.size(); ++idx) {
+        const size_t minPrefix = hyphenator ? hyphenator->minPrefix() : LiangWordConfig::kDefaultMinPrefix;
+        const size_t minSuffix = hyphenator ? hyphenator->minSuffix() : LiangWordConfig::kDefaultMinSuffix;
+        segIndexes.reserve(segmentSize);
+        for (size_t idx = minPrefix; idx + minSuffix <= segmentSize; ++idx) {
           segIndexes.push_back(idx);
         }
       }
 
+      outBreaks.reserve(outBreaks.size() + segIndexes.size());
       for (const size_t idx : segIndexes) {
-        assert(idx > 0 && idx < segment.size());
-        if (idx == 0 || idx >= segment.size()) continue;
+        assert(idx > 0 && idx < segmentSize);
+        if (idx == 0 || idx >= segmentSize) continue;
         const size_t cpIdx = segStart + idx;
         if (cpIdx < cps.size()) {
           outBreaks.push_back({cps[cpIdx].byteOffset, true});
@@ -208,8 +214,8 @@ std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& w
     //                                            @13 Satelliten|sys  (+hyphen)
     //                                            @16 Satellitensys|tems  (+hyphen)
     //   Result: 6 sorted break points; the line-breaker picks the widest prefix that fits.
-    if (hyphenator) {
-      appendSegmentPatternBreaks(cps, *hyphenator, /*includeFallback=*/false, explicitBreakInfos);
+    if (hyphenator || includeFallback) {
+      appendSegmentPatternBreaks(cps, hyphenator, includeFallback && !hyphenator, explicitBreakInfos);
     }
     // Also add apostrophe contraction breaks when present (e.g. "l'état-major"
     // has both an explicit hyphen and an apostrophe that can independently break).
@@ -227,8 +233,8 @@ std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& w
   // applied regardless of whether a language hyphenator is available.
   if (hasApostropheLikeSeparator) {
     std::vector<BreakInfo> segmentedBreaks;
-    if (hyphenator) {
-      appendSegmentPatternBreaks(cps, *hyphenator, includeFallback, segmentedBreaks);
+    if (hyphenator || includeFallback) {
+      appendSegmentPatternBreaks(cps, hyphenator, includeFallback, segmentedBreaks);
     }
     appendApostropheContractionBreaks(cps, segmentedBreaks);
     sortAndDedupeBreakInfos(segmentedBreaks);

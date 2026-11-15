@@ -5,6 +5,7 @@
 #include <Epub/PageLink.h>
 #include <Epub/Section.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <optional>
@@ -14,17 +15,42 @@
 #include "ChapterPosition.h"
 #include "ClipSelectionActivity.h"
 #include "EpubReaderMenuActivity.h"
-#include "LinkNoteTitle.h"
 #include "ProgressMapper.h"
 #include "ReaderActivity.h"
 #include "ReaderToolbarUi.h"
+#include "ReadingSyncState.h"
 #include "components/OptionPopup.h"
+
+namespace vocabulary {
+struct Context;
+}
 
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
+  // One deserialized successor, moved into the normal render path on a hit.
+  std::unique_ptr<Page> prefetchedPage;
+  int prefetchedPageNumber = -1;
+  int prefetchedSpineIndex = -1;
+  uint32_t prefetchedLayoutSignature = 0;
+  int prefetchAttemptedFromPage = -1;
+  int lastRenderedPage = -1;
+  unsigned long pageReadyAt = 0;
+  static constexpr size_t PREFETCH_MEMORY_BUDGET = 24 * 1024;
+  static constexpr size_t PREFETCH_FREE_RESERVE = 64 * 1024;
+  static constexpr size_t PREFETCH_INTERNAL_RESERVE = 48 * 1024;
+  static constexpr size_t PREFETCH_MIN_BLOCK = 32 * 1024;
+  static constexpr unsigned long PREFETCH_IDLE_MS = 400;
+  void clearPrefetchedPage();
+  void resetSection();
+  bool canQueueNextPagePrefetch() const;
+  void idlePrefetchNextPage();
+  bool prefetchHeapAvailable(bool includeBudget) const;
+  std::unique_ptr<Page> takePrefetchedPage(int pageNumber);
   int currentSpineIndex = 0;
   int nextPageNumber = 0;
+  uint16_t vocabularySpine = UINT16_MAX, vocabularyPage = 0;
+  uint32_t vocabularyOffset = UINT32_MAX;
   std::optional<uint16_t> pendingPageJump;
   std::string pendingAnchor;
   int cachedSpineIndex = 0;
@@ -47,15 +73,10 @@ class EpubReaderActivity final : public ReaderActivity {
   bool showBookmarkMessage = false;
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;
-  bool showFontDamagedMessage = false;
-  unsigned long fontDamagedMessageTime = 0UL;
   bool showClippingMessage = false;
   StrId clippingMessage = StrId::STR_CLIPPING_SAVED;
   unsigned long clippingMessageTime = 0UL;
   bool currentPageBookmarked = false;
-  int idlePrewarmSpine = -1;
-  int idlePrewarmPage = -1;
-  unsigned long lastRenderCompleteMs = 0;
   bool bookmarkRemoved = false;
   std::vector<BookmarkEntry> cachedBookmarks;
   bool recentsEntryRemoved = false;
@@ -82,6 +103,14 @@ class EpubReaderActivity final : public ReaderActivity {
   // FreeInkUI chrome + tap targets for the overlay; created when it opens,
   // released when it closes.
   std::unique_ptr<ReaderToolbarUi> toolbarUi;
+  ReaderToolbarUi::Model overlayModel;
+  int textSheetTab = 0, textListPage = 0;
+  readertext::SheetView textSheetView = readertext::SheetView::Controls;
+  int textFontPage = 0;
+  std::array<uint8_t, 256> textSheetSizes{};
+  uint16_t textSheetSizeCount = 0;
+  void loadTextSheetSizes();
+  void handleTextSheetInput(const ReaderToolbarUi::Routed& routed);
   // Modal option picker over the panel (same component the Settings screens
   // use), for enum rows: font size / line spacing / alignment / orientation /
   // auto page turn. Toggle rows stay one-tap toggles, as in Settings.
@@ -98,11 +127,13 @@ class EpubReaderActivity final : public ReaderActivity {
   // be running on the panel. settleOverlayRefresh() must run before the
   // framebuffer is touched or another differential refresh is pushed.
   bool overlayRefreshPending = false;
+  // A deferred overlay refresh whose paint nobody has counted yet. Until it is,
+  // UiAppHost::revealed() is false and every tap on the menu is dropped.
+  bool overlayPaintPending = false;
   void pushOverlayRefresh();
   void settleOverlayRefresh();
   int autoTurnOption = 0;  // current auto page-turn rate index (More panel)
   std::vector<EpubReaderMenuActivity::MenuItem> moreItems;
-  EpubReaderMenuActivity::MenuAction selectedMenuAction = EpubReaderMenuActivity::MenuAction::SELECT_CHAPTER;
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
@@ -145,24 +176,8 @@ class EpubReaderActivity final : public ReaderActivity {
   bool backgroundBuildWanted() const;
   bool buildTickHeapGate();
   bool buildHeapPaused = false;
-  // One bounded build step on the loop task, in a frame whose input did nothing. Lays out about
-  // BACKGROUND_BUILD_PAGES_PER_TICK pages (one 1 KB parse step may add more) and hands the loop
-  // back as soon as a button is down, so a short press is seen before more pages are built.
-  void backgroundBuildTick();
-  bool anyButtonPressed() const;
-  // A background build failed in this spine. The error would likely recur, so from then on the
-  // spine is built only as far as the reader goes; pages from earlier build steps stay readable.
-  int backgroundBuildFailedSpine = -1;
-  // Bluetooth page turner: every chapter build stops the radio until the chapter is built and its
-  // page is shown. False: the radio still holds or is taking the heap, and the build must not run.
-  std::atomic<bool> radioReleasedForBuild{false};
-  bool makeRoomForChapterBuild();
-  static constexpr uint32_t BUILD_ROOM_WAIT_MS = 5000;
-  static constexpr uint32_t BUILD_ROOM_STEP_MS = 50;
-  bool inputOverPage() const override { return overlay != Overlay::None || ReaderActivity::inputOverPage(); }
-  // "Connecting Bluetooth…" or "Bluetooth failed" in place of the status bar title.
-  mutable LinkNoteTitle linkNoteTitle;
   static constexpr size_t RENDER_MIN_FREE_HEAP = 24 * 1024;
+  static constexpr int BUILD_WINDOW_AHEAD = 5;
   static constexpr int PARTIAL_REBUILD_START_MARGIN = 15;
   static constexpr int BUILD_POPUP_PAGE_THRESHOLD = 20;
   static constexpr size_t BUILD_POPUP_BYTE_THRESHOLD = 96 * 1024;
@@ -175,24 +190,21 @@ class EpubReaderActivity final : public ReaderActivity {
   bool saveProgress(int spineIndex, int currentPage, int pageCount);
   void jumpToPercent(int percent);
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
-  int currentTocIndex() const;
   // Live section position, or the values cached before a child screen
   // released the section.
   ChapterPosition chapterPosition() const;
   int bookPercentFor(const ChapterPosition& position) const;
   void openReaderMenu();
+  void openSavedItemsMenu();
   // Toolbar reader menu (see Overlay above).
   bool usesToolbarMenu() const;
-  void openOverlay(Overlay target);
+  void openOverlay(Overlay target, bool showStyle = false);
   void closeOverlayToPage();
   void discardOverlayPage();
   void handleOverlayInput();
   void renderOverlay();
   std::string currentChapterTitle() const;
   // Text panel rows (font, size, line spacing, alignment, focus reading).
-  std::string textRowName(int row) const;
-  std::string textRowValue(int row) const;
-  void showTextRowPopup(int row);
   // Persist + re-paginate + re-render under the open panel (live preview).
   void applyTextSettingLive();
   void paintOverlayPopup();
@@ -203,12 +215,10 @@ class EpubReaderActivity final : public ReaderActivity {
   void buildMoreActions();
   std::string moreRowName(int row) const;
   std::string moreRowValue(int row) const;
+  void writeMoreRowValue(int row, char* out, size_t size) const;
   void activateMoreRow(int row);
   void openFootnoteSelect(bool reopenMenuOnCancel);
   void openDictionaryWordSelect();
-  // Selection to restore when returning from a dictionary lookup.
-  ClipSelectionActivity::Selection pendingLookupSelection;
-  ClipSelectionActivity::Selection lookupReturnSelection;
   void startClipSelection(int initialX = -1, int initialY = -1,
                           ClipSelectionActivity::Mode mode = ClipSelectionActivity::Mode::Clip);
   int clippingAtPoint(const Page& page, int x, int y) const;
@@ -221,6 +231,11 @@ class EpubReaderActivity final : public ReaderActivity {
   int openSpineIndex = -1;
   int openPageNumber = 0;
   bool leavingForSync = false;
+#ifdef FREEINK_DEVICE_STICKY
+  readingsync::State readingSyncState;
+  std::atomic<bool> pendingReadingIntent{false};
+#endif
+  void noteReadingIntent();
   unsigned long confirmLongPressThreshold() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void loadCachedBookmarks();
@@ -233,7 +248,9 @@ class EpubReaderActivity final : public ReaderActivity {
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void drawClippingHighlights(const Page& page, int fontId, int orientedMarginTop, int orientedMarginLeft) const;
-  void renderStatusBar() const;
+  void renderStatusBar();
+  void restoreContentsPosition(ContentsPosition position) override;
+  ContentsPosition contentsPagePosition() const override;
   void applyOrientation(uint8_t orientation);
   void applyInitialOrientation() override;
   // The orientation the current layout was built for. The control center's
@@ -264,22 +281,25 @@ class EpubReaderActivity final : public ReaderActivity {
   void onEndOfBookRendered() override;
 
  public:
+  static std::unique_ptr<Activity> openVocabulary(GfxRenderer&, MappedInputManager&, const vocabulary::Context&);
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookPath,
                               bool allowFastInitialRefresh)
       : ReaderActivity("EpubReader", renderer, mappedInput, std::move(bookPath), allowFastInitialRefresh) {}
   ~EpubReaderActivity() override;
-
   void onExit() override;
+  void runIdleWork() override;
   void loop() override;
+  void openTextSettings() override;
   void render(RenderLock&& lock) override;
 
   bool pageTurn(bool isForward) override;
   bool skipPages(int amount) override;
-  bool remoteShortcut(bool readerMenu) override;
   bool isAtEndOfBook() const override;
+  bool saveFinishedPosition() override;
   void onReturnFromEndOfBook() override;
 
   bool skipLoopDelay() override;
+  std::optional<uint32_t> nextLoopWakeDelayMs(uint32_t now) const override;
 
   ScreenshotInfo getScreenshotInfo() const override;
   CrossPointPosition getCurrentPosition() const;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #define REPLACEMENT_GLYPH 0xFFFD
@@ -22,6 +23,79 @@ void utf8TruncateChars(std::string& str, size_t numChars);
 std::string utf8ComposeNfc(const std::string& in, bool (*onAbsorbed)(uint32_t, void*) = nullptr,
                            void* context = nullptr);
 
+// Collapse every run of ASCII whitespace to a single space, and trim the ends.
+//
+// Text that arrives as markup carries the line breaks and indentation of the
+// document it came in: a pretty-printed OPDS feed puts a newline and two spaces
+// inside every <title>. The device fonts have no glyph for a newline, so it
+// reaches the rasteriser as codepoint 10 and is logged as a missing glyph --
+// visible only in a log, until somebody wires that log line to a failing gate.
+//
+// Collapsing rather than DELETING is the whole point, and is the bug this
+// replaced: removing newlines outright turns "call me\nIshmael" into
+// "call meIshmael", joining the words either side of the break.
+//
+// UTF-8 safe by construction: all six ASCII whitespace bytes are below 0x80, so
+// none of them can ever appear inside a multi-byte sequence.
+std::string utf8CollapseWhitespace(const std::string& in);
+
+// Replace typographic punctuation with the ASCII the device fonts actually
+// carry, leaving everything else byte for byte.
+//
+// A glyph a font does not have draws as NOTHING: no box and no fallback.
+// EpdFont::getGlyph returns nullptr and GfxRenderer skips it without advancing
+// the pen. It is not silent in the LOG -- renderCharImpl says "No glyph for
+// codepoint N" (GfxRenderer.cpp) every time -- but nothing on the device reads
+// that, and the one thing that acts on it, scripts_local/sim-shot.sh, only sees
+// the screens a scripted run happens to visit with real data. So the
+// information was there the whole time and no gate consumed it.
+// The Toybox cuts under src/apps_local/ui/fonts/ are subsets -- Jersey 25 at
+// U+0020..U+007E, the Noto Serif reading cuts at ASCII plus Latin-1 -- so a
+// real Hacker News headline loses its curly quotes, its em dash and its
+// ellipsis on the way to the panel and the reader sees a sentence with holes
+// in it. The system fonts under lib/EpdFont/builtinFonts/ carry all of this
+// and are NOT the reason this exists; host-tests/typefold/ measures which cut
+// carries what rather than asserting it.
+//
+// What is folded: punctuation, spacing and symbols whose ASCII spelling means
+// the same thing -- curly quotes, the dash family, the ellipsis, the space
+// family, the zero-width formatting characters, the arrows and the comparison
+// signs, and the f-ligatures a PDF extractor emits. What is NOT folded:
+// letters. An accented Latin-1 letter renders in every cut that carries
+// external prose, so folding "e-acute" to "e" would degrade every article and
+// comment in the fork to rescue one header band; Latin Extended-A, Greek,
+// Cyrillic and CJK have no ASCII spelling at all, and a wrong letter is worse
+// than a missing one.
+//
+// ASCII in, the same bytes out, and that is by construction rather than by
+// habit: no entry in the table is below U+00A0, and a string with no byte
+// above 0x7F returns without allocating.
+//
+// Not the same job as connections::foldToAscii (src/apps_local/connections/
+// ConnectionsText.h), and the two should not be merged. That one transliterates
+// a whole word down to strict ASCII -- accented letters included, emoji
+// rejected -- because a Connections tile is a fixed box of capitals and a word
+// it cannot draw is a puzzle nobody can play. This one is for prose, where the
+// cut CAN draw the letters and rewriting them would be the damage.
+//
+// Invalid UTF-8 passes through unchanged. The decoder is only consulted to
+// find a codepoint to look up; bytes it cannot make sense of are copied
+// verbatim rather than replaced, so a truncated multi-byte sequence coming off
+// a socket is not turned into something else.
+std::string utf8FoldTypography(const std::string& in);
+
+// One entry of the fold table: a codepoint and the ASCII that replaces it.
+struct Utf8TypographyFold {
+  uint32_t cp;
+  const char* ascii;
+};
+
+// The table itself, so a test can walk it instead of keeping a second copy of
+// the same list. host-tests/typefold/ takes every entry to the real font data
+// and asks whether the source is genuinely missing and the replacement is
+// genuinely there, which is a check that DISCOVERS a bad new row rather than
+// re-asserting the rows somebody already thought about.
+const Utf8TypographyFold* utf8TypographyFolds(size_t* count);
 // Compose a null-terminated display buffer without allocating or growing it.
 // Uncomposed bytes (including malformed UTF-8) are preserved unchanged.
 void utf8ComposeNfcInPlace(char* buffer);
@@ -75,50 +149,90 @@ inline bool utf8IsHangul(const uint32_t cp) {
          || (cp >= 0xFFA0 && cp <= 0xFFDC);  // Halfwidth Hangul
 }
 
-// Writes cp as UTF-8 (1-4 bytes, no terminator) and returns the position after it.
-inline char* utf8AppendCodepoint(char* output, const uint32_t codepoint) {
-  if (codepoint < 0x80) {
-    *output++ = static_cast<char>(codepoint);
-  } else if (codepoint < 0x800) {
-    *output++ = static_cast<char>(0xC0 | (codepoint >> 6));
-    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-  } else if (codepoint < 0x10000) {
-    *output++ = static_cast<char>(0xE0 | (codepoint >> 12));
-    *output++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-  } else {
-    *output++ = static_cast<char>(0xF0 | (codepoint >> 18));
-    *output++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-    *output++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-  }
-  return output;
-}
-
-// Uppercase partner of a lowercase Latin, Greek or Cyrillic letter; other codepoints are
-// returned unchanged. Used to synthesize small caps, so letters without a single-codepoint
-// uppercase form (e.g. U+00DF) stay as they are.
-inline uint32_t utf8SmallCapsUpper(const uint32_t cp) {
-  if (cp >= 'a' && cp <= 'z') return cp - 0x20;
-  if (cp < 0xE0) return cp;
-  if (cp <= 0xFE) return cp == 0xF7 ? cp : cp - 0x20;  // Latin-1 (skips the division sign)
-  if (cp == 0xFF) return 0x178;
-  if (cp <= 0x17F) {
-    // Latin Extended-A pairs: lowercase on odd codepoints, except the two odd-aligned runs.
-    const bool oddAligned = (cp >= 0x139 && cp <= 0x148) || (cp >= 0x179 && cp <= 0x17E);
-    if (cp == 0x131 || cp == 0x138 || cp == 0x149 || cp == 0x17F) return cp;
-    return (cp % 2 == (oddAligned ? 0u : 1u)) ? cp - 1 : cp;
-  }
-  if (cp >= 0x3B1 && cp <= 0x3C9) return cp == 0x3C2 ? 0x3A3 : cp - 0x20;  // Greek (final sigma -> Sigma)
-  if (cp >= 0x430 && cp <= 0x44F) return cp - 0x20;                        // Cyrillic
-  if (cp >= 0x450 && cp <= 0x45F) return cp - 0x50;
-  return cp;
-}
-
 // Returns true for Unicode combining diacritical marks that should not advance the cursor.
 inline bool utf8IsCombiningMark(const uint32_t cp) {
   return (cp >= 0x0300 && cp <= 0x036F)      // Combining Diacritical Marks
          || (cp >= 0x1DC0 && cp <= 0x1DFF)   // Combining Diacritical Marks Supplement
          || (cp >= 0x20D0 && cp <= 0x20FF)   // Combining Diacritical Marks for Symbols
          || (cp >= 0xFE20 && cp <= 0xFE2F);  // Combining Half Marks
+}
+
+inline bool utf8NoBreakBeforeCjk(const uint32_t cp) {
+  switch (cp) {
+    case '.':
+    case ',':
+    case ':':
+    case ';':
+    case '!':
+    case '?':
+    case ')':
+    case ']':
+    case '}':
+    case 0x00BB:  // »
+    case 0x2019:  // ’
+    case 0x201D:  // ”
+    case 0x3001:  // 、
+    case 0x3002:  // 。
+    case 0x3009:  // 〉
+    case 0x300B:  // 》
+    case 0x300D:  // 」
+    case 0x300F:  // 』
+    case 0x3011:  // 】
+    case 0x3015:  // 〕
+    case 0x3017:  // 〗
+    case 0x3019:  // 〙
+    case 0x301B:  // 〛
+    case 0xFF01:  // ！
+    case 0xFF09:  // ）
+    case 0xFF0C:  // ，
+    case 0xFF0E:  // ．
+    case 0xFF1A:  // ：
+    case 0xFF1B:  // ；
+    case 0xFF1F:  // ？
+    case 0xFF3D:  // ］
+    case 0xFF5D:  // ｝
+      return true;
+    default:
+      return false;
+  }
+}
+
+inline bool utf8NoBreakAfterCjk(const uint32_t cp) {
+  switch (cp) {
+    case '(':
+    case '[':
+    case '{':
+    case 0x00AB:  // «
+    case 0x2018:  // ‘
+    case 0x201C:  // “
+    case 0x3008:  // 〈
+    case 0x300A:  // 《
+    case 0x300C:  // 「
+    case 0x300E:  // 『
+    case 0x3010:  // 【
+    case 0x3014:  // 〔
+    case 0x3016:  // 〖
+    case 0x3018:  // 〘
+    case 0x301A:  // 〚
+    case 0xFF08:  // （
+    case 0xFF3B:  // ［
+    case 0xFF5B:  // ｛
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Whether a line may break between two adjacent codepoints. CJK is written
+// without spaces, so the opportunity is per character -- minus the kinsoku
+// exceptions: no break after an opening bracket, none before closing
+// punctuation, and none before a combining mark.
+//
+// The reader's layout (Epub/ParsedText) and the UI's wrapper
+// (GfxRenderer::wrappedText) both break here, so the tables live once.
+inline bool utf8HasCjkBreakOpportunity(const uint32_t leftCp, const uint32_t rightCp) {
+  if (!utf8IsCjkBreakable(leftCp) && !utf8IsCjkBreakable(rightCp)) return false;
+  if (utf8NoBreakAfterCjk(leftCp) || utf8NoBreakBeforeCjk(rightCp)) return false;
+  if (utf8IsCombiningMark(rightCp)) return false;
+  return true;
 }

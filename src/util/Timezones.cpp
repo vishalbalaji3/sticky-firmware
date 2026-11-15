@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 
 #include "CrossPointSettings.h"
 
@@ -118,9 +119,16 @@ constexpr TimezoneInfo TABLE[] = {
     {"UTC+13:00", "UTC-13", 52},
     {"UTC+13:30", "UTC-13:30", 54},
     {"UTC+14:00", "UTC-14", 56},
+    {"Punta Arenas", "UTC3", -12},
 };
 constexpr size_t TABLE_COUNT = sizeof(TABLE) / sizeof(TABLE[0]);
 constexpr uint8_t UTC_INDEX = 17;
+constexpr uint8_t DEFAULT_INDEX = 104;
+constexpr uint8_t SANTIAGO_INDEX = 12;
+static_assert(std::string_view(TABLE[SANTIAGO_INDEX].name) == "Santiago");
+static_assert(std::string_view(TABLE[DEFAULT_INDEX].name) == "Punta Arenas" &&
+                  std::string_view(TABLE[DEFAULT_INDEX].posixTz) == "UTC3" && TABLE[DEFAULT_INDEX].stdOffsetQ == -12,
+              "Default clock zone must remain Punta Arenas (UTC-03:00)");
 static_assert(TABLE[UTC_INDEX].stdOffsetQ == 0, "UTC_INDEX must point at the UTC entry");
 static_assert(TABLE_COUNT < 255, "255 is the 'never chosen' sentinel in clockTimezone");
 
@@ -128,6 +136,18 @@ static_assert(TABLE_COUNT < 255, "255 is the 'never chosen' sentinel in clockTim
 
 const TimezoneInfo* table() { return TABLE; }
 size_t count() { return TABLE_COUNT; }
+
+uint8_t pickerZoneAt(uint8_t row) {
+  if (row == SANTIAGO_INDEX + 1) return DEFAULT_INDEX;
+  if (row > SANTIAGO_INDEX + 1 && row <= DEFAULT_INDEX) return row - 1;
+  return row;
+}
+
+uint8_t pickerRowForZone(uint8_t zone) {
+  if (zone == DEFAULT_INDEX) return SANTIAGO_INDEX + 1;
+  if (zone > SANTIAGO_INDEX && zone < DEFAULT_INDEX) return zone + 1;
+  return zone;
+}
 
 uint8_t activeIndex() {
   if (SETTINGS.clockTimezone < TABLE_COUNT) return SETTINGS.clockTimezone;
@@ -147,7 +167,7 @@ uint8_t activeIndex() {
       if (TABLE[i].stdOffsetQ == legacyQ) return static_cast<uint8_t>(i);
     }
   }
-  return UTC_INDEX;
+  return DEFAULT_INDEX;
 }
 
 void formatOffset(const uint8_t index, char* buf, const size_t bufSize) {

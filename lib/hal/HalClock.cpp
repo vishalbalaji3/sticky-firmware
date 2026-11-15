@@ -3,6 +3,7 @@
 #include <Logging.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
+#include <sys/time.h>
 #include <time.h>
 
 HalClock halClock;  // Singleton instance
@@ -10,6 +11,35 @@ HalClock halClock;  // Singleton instance
 void HalClock::begin() {
   _available = _sdkRtc.begin();
   LOG_INF("CLK", _available ? "SDK RTC found" : "RTC not found");
+
+  // Load the hardware RTC into system time. Nothing else ever did: time()
+  // started at the 1970 epoch on every hard boot (flash, reset, battery loss)
+  // and stayed there until an NTP sync happened to run in that power cycle.
+  // The status-bar clock hid it by reading the RTC chip directly, while every
+  // consumer of time() -- Connections' today(), Study's due dates, the
+  // clock-predates-build resync check -- saw 1970. Deep-sleep wakes preserve
+  // system time, which is why the X4 Pro rarely showed it and a
+  // frequently-reflashed device always did. The RTC stores UTC (the NTP path
+  // writes it as UTC); a year before 2020 means the chip itself was never
+  // set, and epoch is no worse than garbage, so leave system time alone.
+  Rtc::DateTime dt;
+  if (_available && _sdkRtc.now(dt) && dt.year >= 2020) {
+    struct tm t = {};
+    t.tm_year = dt.year - 1900;
+    t.tm_mon = dt.month - 1;
+    t.tm_mday = dt.day;
+    t.tm_hour = dt.hour;
+    t.tm_min = dt.minute;
+    t.tm_sec = dt.second;
+    const time_t epoch = mktime(&t);  // TZ unset on device: interpreted as UTC
+    if (epoch > 0) {
+      struct timeval tv = {};
+      tv.tv_sec = epoch;
+      settimeofday(&tv, nullptr);
+      LOG_INF("CLK", "System time restored from RTC: %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day,
+              dt.hour, dt.minute, dt.second);
+    }
+  }
 }
 
 namespace {
@@ -86,43 +116,90 @@ bool HalClock::syncFromNTP() {
 
   LOG_INF("CLK", "Starting NTP sync...");
   // configTzTime overwrites the process TZ with UTC0 for the SNTP exchange;
-  // remember the display timezone so it can be restored below.
+  // remember the display timezone so it can be restored on every exit below.
   const char* tzBefore = getenv("TZ");
   char savedTz[64] = {0};
   if (tzBefore) snprintf(savedTz, sizeof(savedTz), "%s", tzBefore);
-  configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
 
-  // Wait for SNTP sync to complete (up to 5 seconds)
-  constexpr int maxAttempts = 50;
-  for (int i = 0; i < maxAttempts; i++) {
-    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
-      time_t now = time(nullptr);
-      struct tm timeinfo;
-      gmtime_r(&now, &timeinfo);
-
-      Rtc::DateTime dt;
-      dt.year = static_cast<uint16_t>(timeinfo.tm_year + 1900);
-      dt.month = static_cast<uint8_t>(timeinfo.tm_mon + 1);
-      dt.day = static_cast<uint8_t>(timeinfo.tm_mday);
-      dt.hour = static_cast<uint8_t>(timeinfo.tm_hour);
-      dt.minute = static_cast<uint8_t>(timeinfo.tm_min);
-      dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
-      dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
-      const bool ok = _sdkRtc.set(dt);
-      if (ok) {
-        _cachedUtc = epochFromUtc(dt);
-        _hasCachedTime = true;
-        _lastPollMs = 0;
-        LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
-                dt.second);
-      }
-      setTimezone(savedTz);
-      return ok;
+  // Two rounds of 8 seconds rather than one of 5: the sync often runs right
+  // after association, while DHCP and DNS are still settling, and one lost
+  // UDP packet used to surface as a user-facing "Sync failed". Restarting
+  // SNTP between rounds forces a fresh DNS lookup and request instead of
+  // waiting out the stack's own retry interval.
+  constexpr int kRounds = 2;
+  constexpr int kAttemptsPerRound = 80;  // x 100ms = 8s per round
+  for (int round = 0; round < kRounds; ++round) {
+    if (esp_sntp_enabled()) {
+      esp_sntp_stop();
     }
-    delay(100);
+    LOG_INF("CLK", "NTP sync attempt %d/%d", round + 1, kRounds);
+    configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
+    for (int i = 0; i < kAttemptsPerRound; i++) {
+      if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+        time_t now = time(nullptr);
+        struct tm timeinfo;
+        gmtime_r(&now, &timeinfo);
+
+        Rtc::DateTime dt;
+        dt.year = static_cast<uint16_t>(timeinfo.tm_year + 1900);
+        dt.month = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+        dt.day = static_cast<uint8_t>(timeinfo.tm_mday);
+        dt.hour = static_cast<uint8_t>(timeinfo.tm_hour);
+        dt.minute = static_cast<uint8_t>(timeinfo.tm_min);
+        dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
+        dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
+        const bool ok = _sdkRtc.set(dt);
+        if (ok) {
+          _cachedUtc = epochFromUtc(dt);
+          _hasCachedTime = true;
+          _lastPollMs = 0;
+          LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
+                  dt.second);
+        } else {
+          LOG_ERR("CLK", "RTC refused the time write");
+        }
+        setTimezone(savedTz);
+        return ok;
+      }
+      delay(100);
+    }
   }
 
-  LOG_ERR("CLK", "NTP sync timed out");
+  LOG_ERR("CLK", "NTP sync timed out %d times; DNS or UDP port 123 may be blocked", kRounds);
   setTimezone(savedTz);
   return false;
+}
+
+bool HalClock::setLocalTime(const struct tm& value) {
+  if (!_available || value.tm_year < 120 || value.tm_year > 199 || value.tm_mon < 0 || value.tm_mon > 11 ||
+      value.tm_mday < 1 || value.tm_mday > 31 || value.tm_hour < 0 || value.tm_hour > 23 || value.tm_min < 0 ||
+      value.tm_min > 59)
+    return false;
+  struct tm local = value;
+  local.tm_sec = 0;
+  local.tm_isdst = -1;
+  const time_t epoch = mktime(&local);
+  if (epoch == time_t(-1) || local.tm_year != value.tm_year || local.tm_mon != value.tm_mon ||
+      local.tm_mday != value.tm_mday || local.tm_hour != value.tm_hour || local.tm_min != value.tm_min) {
+    LOG_ERR("CLK", "Invalid local date/time");
+    return false;
+  }
+  struct tm utc{};
+  gmtime_r(&epoch, &utc);
+  if (utc.tm_year < 120 || utc.tm_year > 199) return false;
+  const Rtc::DateTime dt{static_cast<uint16_t>(utc.tm_year + 1900), static_cast<uint8_t>(utc.tm_mon + 1),
+                         static_cast<uint8_t>(utc.tm_mday),         static_cast<uint8_t>(utc.tm_hour),
+                         static_cast<uint8_t>(utc.tm_min),          0,
+                         static_cast<uint8_t>(utc.tm_wday)};
+  if (!_sdkRtc.set(dt)) {
+    LOG_ERR("CLK", "RTC refused manual date/time");
+    return false;
+  }
+  struct timeval tv{};
+  tv.tv_sec = epoch;
+  if (settimeofday(&tv, nullptr) != 0) LOG_ERR("CLK", "Could not update system time after RTC write");
+  _cachedUtc = epoch;
+  _hasCachedTime = true;
+  _lastPollMs = 0;
+  return true;
 }

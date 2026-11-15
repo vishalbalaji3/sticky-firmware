@@ -24,9 +24,9 @@ TEST(AutoSyncPolicy, PullNeedsCredentials) {
 
 TEST(AutoSyncPolicy, NoPullWhenReturningFromSync) { EXPECT_FALSE(shouldPullOnOpen(true, Status{}, kBook, true, kNow)); }
 
-TEST(AutoSyncPolicy, SkipsPullRightAfterSuccessfulSync) {
-  EXPECT_FALSE(shouldPullOnOpen(true, ok(kBook, kNow - 30), kBook, false, kNow));
-  EXPECT_TRUE(shouldPullOnOpen(true, ok(kBook, kNow - kRecentSyncSeconds), kBook, false, kNow));
+TEST(AutoSyncPolicy, ReopeningChecksForImmediatePhoneChanges) {
+  EXPECT_TRUE(shouldPullOnOpen(true, ok(kBook, kNow - 30), kBook, false, kNow));
+  EXPECT_TRUE(shouldPullOnOpen(true, ok(kBook, kNow - 120), kBook, false, kNow));
   EXPECT_TRUE(shouldPullOnOpen(true, ok(bookKey("/other.epub"), kNow - 30), kBook, false, kNow));
   EXPECT_TRUE(shouldPullOnOpen(true, Status{kBook, Result::Failed, kNow - 30}, kBook, false, kNow));
   // Unknown clock or a clock that went backwards: pull rather than trust the age.
@@ -77,4 +77,48 @@ TEST(SavedWifiOrder, SavedInRangeStrongestFirstOncePerSsid) {
   EXPECT_EQ((std::vector<size_t>{2, 3}), savedJoinOrder(scan, {"home", "phone", "office"}));
   EXPECT_TRUE(savedJoinOrder(scan, {"office"}).empty());
   EXPECT_TRUE(savedJoinOrder({}, {"home"}).empty());
+}
+
+#include "activities/reader/ReadingSyncState.h"
+
+TEST(ReadingReconciliation, PhoneRewindDownloadsWhenLocalHasNoEdits) {
+  const readingsync::State baseline{42, 1, true, false};
+  EXPECT_EQ(readingsync::reconcile(baseline, 42, 2), readingsync::Decision::Download);
+}
+
+TEST(ReadingReconciliation, SamePositionsNeedDifferentDecisionsForDifferentAncestry) {
+  // Local 2%, remote 72%: a local rewind is safe only against its shared baseline.
+  const readingsync::State localRewind{42, 1, true, true};
+  EXPECT_EQ(readingsync::reconcile(localRewind, 42, 1), readingsync::Decision::Upload);
+  EXPECT_EQ(readingsync::reconcile(localRewind, 42, 2), readingsync::Decision::Choose);
+}
+
+TEST(ReadingReconciliation, UnknownOrChangedAccountNeverOverwritesAutomatically) {
+  EXPECT_EQ(readingsync::reconcile({42, 3, true, false}, 42, 1), readingsync::Decision::Choose);
+  EXPECT_EQ(readingsync::reconcile({}, 42, 1), readingsync::Decision::Choose);
+  EXPECT_EQ(readingsync::reconcile({42, 1, true, false}, 43, 1), readingsync::Decision::Choose);
+  EXPECT_EQ(readingsync::reconcile({42, 1, true, true}, 42, std::nullopt), readingsync::Decision::Choose);
+  EXPECT_EQ(readingsync::reconcile({42, 1, true, false}, 42, 1), readingsync::Decision::Keep);
+}
+
+TEST(ReadingReconciliation, OfflineEditsSurviveReopenButTornAssociationsAreUnknown) {
+  const uint8_t progress[] = {1, 0, 5, 0, 10, 0};
+  uint8_t record[readingsync::RECORD_SIZE];
+  readingsync::encode({42, 3, true, true}, progress, sizeof(progress), record);
+  auto restored = readingsync::decode(record, sizeof(record), progress, sizeof(progress));
+  EXPECT_EQ(readingsync::reconcile(restored, 42, 3), readingsync::Decision::Upload);
+  EXPECT_EQ(readingsync::reconcile(restored, 42, 4), readingsync::Decision::Choose);
+  const uint8_t different[] = {1, 0, 6, 0, 10, 0};
+  EXPECT_FALSE(readingsync::decode(record, sizeof(record), different, sizeof(different)).known);
+  record[5] = 0;
+  EXPECT_FALSE(readingsync::decode(record, sizeof(record), progress, sizeof(progress)).known);
+  EXPECT_FALSE(readingsync::decode(record, 12, progress, sizeof(progress)).known);
+}
+
+TEST(AutoSyncPolicy, CompletedBookWithoutSectionStillPullsPhoneRewinds) {
+  EXPECT_TRUE(canPullAfterRender(-1, false, true, true));
+  EXPECT_TRUE(canPullAfterRender(-1, true, false, true));
+  EXPECT_FALSE(canPullAfterRender(-1, false, false, true));
+  EXPECT_FALSE(canPullAfterRender(-1, false, true, false));
+  EXPECT_FALSE(canPullAfterRender(12, false, true, true));
 }

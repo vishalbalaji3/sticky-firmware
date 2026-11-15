@@ -1,6 +1,7 @@
 #pragma once
 #include <FreeInkUIGfxRenderer.h>
 #include <GfxRenderer.h>
+#include <PaintClock.h>
 
 #include <atomic>
 #include <cstdint>
@@ -100,6 +101,26 @@ class KeyboardEntryActivity : public Activity {
   // on dual-core targets.
   std::atomic<bool> interactionsReady{false};
 
+  // interactionsReady opens when the table is PUBLISHED; the panel does not
+  // show it until displayBuffer() returns, 0.3-2s later. For that whole window
+  // the screen under the user's finger is still whatever pushed this activity
+  // -- a settings list, a Wi-Fi picker -- and a tap where one of ITS rows was
+  // lands on a key. This latch keeps touch shut until the first paint.
+  //
+  // Armed on screen ENTRY only, and revealed() latches, so no later render
+  // re-arms it. That is deliberate and is the difference between this and the
+  // digest gate the toybox screens use (paintclock::RevealedInteractions).
+  // Digesting this table would gate every LAYER change, and shift swaps the
+  // whole layout -- builtinKeyboardLayout(layoutId, shifted, ...) returns a
+  // different table with different key VALUES per layer, and shift
+  // auto-releases after one character. Every capital letter would therefore be
+  // followed by a full refresh of dead keyboard, which is the frozen-device
+  // failure this mechanism exists to avoid. A layer change is also the benign
+  // half of the problem: it is caused by the user's own released tap, so the
+  // next tap is a deliberate new contact, not a stationary finger being
+  // betrayed by a change it did not cause.
+  paintclock::RevealGate revealGate;
+
   int delPressCount = 0;
   bool hintVisible = false;
   unsigned long hintShowTime = 0;
@@ -135,6 +156,9 @@ class KeyboardEntryActivity : public Activity {
   static size_t utf8Next(const std::string& s, size_t pos);
 
   freeink::ui::Rect keyboardRect() const;
+  int inputFieldTop() const;
+  int inputFieldLines() const;
+  int inputWindowStart(std::string& displayText, int width) const;
 
   static constexpr uint16_t LONG_PRESS_MS = 500;
   static constexpr uint16_t DEL_LONG_PRESS_MS = 1500;

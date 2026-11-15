@@ -2,6 +2,7 @@
 
 #include <FS.h>  // need to be included before SdFat.h for compatibility with FS.h's File class
 #include <Logging.h>
+#include <Memory.h>
 #include <SDCardManager.h>
 #include <esp_heap_caps.h>
 #if FREEINK_CAP_USB_MSC
@@ -123,9 +124,6 @@ UsbDriveState HalStorage::usbDriveState() const {
   HalStorage::StorageLock lock;               \
   return SDCard.method(__VA_ARGS__);
 
-uint64_t HalStorage::sdTotalBytes() { HAL_STORAGE_WRAPPED_CALL(sdTotalBytes); }
-bool HalStorage::sdUsedBytes(uint64_t& usedBytes) { HAL_STORAGE_WRAPPED_CALL(sdUsedBytes, usedBytes); }
-
 std::vector<String> HalStorage::listFiles(const char* path, int maxFiles) {
   HAL_STORAGE_WRAPPED_CALL(listFiles, path, maxFiles);
 }
@@ -196,6 +194,8 @@ bool HalStorage::mkdir(const char* path, const bool pFlag) { HAL_STORAGE_WRAPPED
 
 bool HalStorage::exists(const char* path) { HAL_STORAGE_WRAPPED_CALL(exists, path); }
 
+bool HalStorage::freeBytes(uint64_t& out) { HAL_STORAGE_WRAPPED_CALL(sdFreeBytes, out); }
+
 bool HalStorage::remove(const char* path) { HAL_STORAGE_WRAPPED_CALL(remove, path); }
 bool HalStorage::rename(const char* oldPath, const char* newPath) {
   HAL_STORAGE_WRAPPED_CALL(rename, oldPath, newPath);
@@ -239,6 +239,28 @@ bool HalStorage::openFileForWrite(const char* moduleName, const String& path, Ha
   return openFileForWrite(moduleName, path.c_str(), file);
 }
 
+bool HalStorage::openFileForAppend(const char* moduleName, const char* path, HalFile& file) {
+  StorageLock lock;  // ensure thread safety for the duration of this function
+  FsFile fsFile = SDCard.open(path, O_RDWR | O_CREAT | O_AT_END);
+  const bool ok = fsFile.isOpen();
+  if (!ok) {
+    LOG_ERR(moduleName, "Failed to open %s for append", path);
+  }
+  file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
+  return ok;
+}
+
+bool HalStorage::openFileForUpdate(const char* moduleName, const char* path, HalFile& file) {
+  StorageLock lock;  // ensure thread safety for the duration of this function
+  FsFile fsFile = SDCard.open(path, O_RDWR);
+  const bool ok = fsFile.isOpen();
+  if (!ok) {
+    LOG_ERR(moduleName, "Failed to open %s for update", path);
+  }
+  file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
+  return ok;
+}
+
 bool HalStorage::removeDir(const char* path) { HAL_STORAGE_WRAPPED_CALL(removeDir, path); }
 
 // HalFile implementation
@@ -254,7 +276,14 @@ bool HalStorage::removeDir(const char* path) { HAL_STORAGE_WRAPPED_CALL(removeDi
   assert(impl != nullptr);                 \
   return impl->file.method(__VA_ARGS__);
 
-void HalFile::flush() { HAL_FILE_WRAPPED_CALL(flush, ); }
+// flush() and close() are cleanup calls: teardown paths run them unconditionally
+// on handles that may never have been assigned, and the simulator HAL already
+// treats that as a no-op. Only these two tolerate a null impl; the asserts stay
+// on read/write/seek, where a never-opened handle is a logic error.
+void HalFile::flush() {
+  if (impl == nullptr) return;
+  HAL_FILE_WRAPPED_CALL(flush, );
+}
 size_t HalFile::getName(char* name, size_t len) { HAL_FILE_WRAPPED_CALL(getName, name, len); }
 size_t HalFile::size() { HAL_FILE_FORWARD_CALL(size, ); }              // already thread-safe, no need to wrap
 size_t HalFile::fileSize() { HAL_FILE_FORWARD_CALL(fileSize, ); }      // already thread-safe, no need to wrap
@@ -281,11 +310,28 @@ size_t HalFile::write(uint8_t b) { HAL_FILE_WRAPPED_CALL(write, b); }
 bool HalFile::rename(const char* newPath) { HAL_FILE_WRAPPED_CALL(rename, newPath); }
 bool HalFile::isDirectory() const { HAL_FILE_FORWARD_CALL(isDirectory, ); }  // already thread-safe, no need to wrap
 void HalFile::rewindDirectory() { HAL_FILE_WRAPPED_CALL(rewindDirectory, ); }
-bool HalFile::close() { HAL_FILE_WRAPPED_CALL(close, ); }
+bool HalFile::close() {
+  if (impl == nullptr) return false;
+  HAL_FILE_WRAPPED_CALL(close, );
+}
 HalFile HalFile::openNextFile() {
   HalStorage::StorageLock lock;
   assert(impl != nullptr);
   return HalFile(std::make_unique<Impl>(impl->file.openNextFile()));
+}
+HalFile HalFile::openNextFile(bool& ioError) {
+  HalStorage::StorageLock lock;
+  assert(impl != nullptr);
+  // The returned handle owns this Impl beyond the call; allocation failure is
+  // an enumeration error, never an apparent end of the directory.
+  auto next = makeUniqueNoThrow<Impl>(impl->file.openNextFile());
+  if (!next) {
+    LOG_ERR("STORAGE", "OOM: directory entry handle");
+    ioError = true;
+    return HalFile();
+  }
+  ioError = impl->file.getError() != 0;
+  return HalFile(std::move(next));
 }
 bool HalFile::isOpen() const { return impl != nullptr && impl->file.isOpen(); }  // already thread-safe, no need to wrap
 HalFile::operator bool() const { return isOpen(); }

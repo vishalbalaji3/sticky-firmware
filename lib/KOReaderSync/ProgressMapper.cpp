@@ -887,8 +887,13 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
   if (xpathSpine >= 0 && xpathSpine < spineCount) {
     result.spineIndex = xpathSpine;
     result.hasResolvedSpineIndex = true;
-  } else if (const int found = epub->getSpineIndexForSize(targetBytes); found >= 0) {
-    result.spineIndex = found;
+  } else {
+    for (int i = 0; i < spineCount; i++) {
+      if (epub->getCumulativeSpineItemSize(i) >= targetBytes) {
+        result.spineIndex = i;
+        break;
+      }
+    }
   }
 
   const size_t prevCum = (result.spineIndex > 0) ? epub->getCumulativeSpineItemSize(result.spineIndex - 1) : 0;

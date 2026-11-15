@@ -16,7 +16,7 @@ struct RecentBook {
 
 class RecentBooksStore : public PersistableStore<RecentBooksStore> {
  public:
-  static constexpr int MAX_RECENT_BOOKS = 10;
+  static constexpr int MAX_RECENT_BOOKS = 30;
 
  private:
   std::vector<RecentBook> recentBooks;
@@ -27,6 +27,7 @@ class RecentBooksStore : public PersistableStore<RecentBooksStore> {
   friend class PersistableStore<RecentBooksStore>;
 
  public:
+  static RecentBooksStore& getInstance() { return PersistableStore<RecentBooksStore>::getLoadedInstance(); }
   static const char* getFilePath() { return "/.crosspoint/recent.json"; }
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);

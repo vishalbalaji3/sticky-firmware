@@ -52,6 +52,7 @@ struct KOReaderProgress {
   std::string device;                            // Device name
   std::string deviceId;                          // Device ID
   int64_t timestamp;                             // Unix timestamp of last update
+  std::optional<uint64_t> revision;              // Custom server revision for conditional updates
   std::optional<KOReaderMetadata> metadata;      // Optional document metadata
   std::optional<KOReaderRichPosition> position;  // Optional rich position
 };
@@ -81,11 +82,16 @@ class KOReaderSyncClient {
     JSON_ERROR,
     NOT_FOUND,
     LOW_MEMORY,
-    USER_EXISTS
+    USER_EXISTS,
+    CONFLICT
   };
 
   // Sent with every upload, so a pulled record shows whether this device wrote it.
+#ifdef FREEINK_DEVICE_STICKY
   static constexpr char DEVICE_ID[] = "crosspoint-reader";
+#else
+  static constexpr char DEVICE_ID[] = "crossplay-reader";
+#endif
 
   /**
    * Authenticate with the sync server (validate credentials).
@@ -114,7 +120,7 @@ class KOReaderSyncClient {
    * @param progress The progress data to upload
    * @return OK on success, error code on failure
    */
-  static Error updateProgress(const KOReaderProgress& progress);
+  static Error updateProgress(const KOReaderProgress& progress, std::optional<uint64_t>* savedRevision = nullptr);
 
   /**
    * Get human-readable error message.

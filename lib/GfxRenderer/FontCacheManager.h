@@ -24,11 +24,6 @@ class FontCacheManager {
   //     FreeType faces (TtfEpdFont::releaseResidentCaches).
   // Everything faults back in on demand. For heap-critical transitions (e.g.
   // web-server + WiFi startup, image decode, dictionary, sleep).
-  using ReleaseCallback = void (*)(void* ctx);
-  void setReleaseCallback(ReleaseCallback cb, void* ctx) {
-    releaseCb_ = cb;
-    releaseCtx_ = ctx;
-  }
   void releaseSdFontCaches();
   void prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F, bool accumulate = true);
   void logStats(const char* label = "render");
@@ -42,9 +37,10 @@ class FontCacheManager {
   FontDecompressor* getDecompressor() const { return fontDecompressor_; }
 
   // RAII scope for two-pass prewarm pattern
+  enum class ScopeCache : uint8_t { Transient, Reader };
   class PrewarmScope {
    public:
-    explicit PrewarmScope(FontCacheManager& manager);
+    explicit PrewarmScope(FontCacheManager& manager, ScopeCache cache = ScopeCache::Transient);
     ~PrewarmScope();
     void endScanAndPrewarm();
     PrewarmScope(PrewarmScope&& other) noexcept;
@@ -54,13 +50,14 @@ class FontCacheManager {
 
    private:
     FontCacheManager* manager_;
+    ScopeCache cache_;
     bool active_ = true;
   };
-  PrewarmScope createPrewarmScope();
+  // Reader scopes retain bounded vector glyph/kerning caches between pages.
+  PrewarmScope createPrewarmScope(ScopeCache cache = ScopeCache::Transient);
 
  private:
-  ReleaseCallback releaseCb_ = nullptr;
-  void* releaseCtx_ = nullptr;
+  void clearScopeCache(ScopeCache cache);
   const std::map<int, EpdFontFamily>& fontMap_;
   const std::map<int, SdCardFont*>& sdCardFonts_;
   // Read only when CROSSPOINT_VECTOR_FONTS is on (PSRAM boards).

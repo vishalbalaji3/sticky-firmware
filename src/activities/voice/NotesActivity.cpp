@@ -46,7 +46,7 @@ const char* notesLabel(const voice::NoteLabel label) {
 }
 }  // namespace
 
-int NotesActivity::loadRows() {
+int VoiceNotesActivity::loadRows() {
   rows.clear();
   int pending = 0;
   std::string text;
@@ -80,17 +80,17 @@ int NotesActivity::loadRows() {
   return pending;
 }
 
-void NotesActivity::onEnter() {
+void VoiceNotesActivity::onEnter() {
   loadRows();
   UiListActivity::onEnter();
 }
 
-void NotesActivity::onExit() {
+void VoiceNotesActivity::onExit() {
   stopWifi();
   UiListActivity::onExit();
 }
 
-void NotesActivity::loop() {
+void VoiceNotesActivity::loop() {
   // The cached list and "Syncing..." go up before the blocking join.
   if (sync == Sync::Start && !voice::isRecording() && activityManager.currentScreenPainted()) {
     syncNow();
@@ -101,7 +101,7 @@ void NotesActivity::loop() {
   UiListActivity::loop();
 }
 
-void NotesActivity::syncNow() {
+void VoiceNotesActivity::syncNow() {
   int pending = 0;
   {
     // The card shares SPI with the display, and the rows change under the render task.
@@ -132,7 +132,7 @@ void NotesActivity::syncNow() {
   requestUpdate();
 }
 
-void NotesActivity::recheckTranscripts() {
+void VoiceNotesActivity::recheckTranscripts() {
   rechecks++;
   int pending = 0;
   {
@@ -151,19 +151,19 @@ void NotesActivity::recheckTranscripts() {
   requestUpdate();
 }
 
-void NotesActivity::finishSync() {
+void VoiceNotesActivity::finishSync() {
   sync = Sync::Idle;
   // Off even if it was on before, to save battery.
   stopWifi();
 }
 
-void NotesActivity::drawChrome() {
+void VoiceNotesActivity::drawChrome() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, tr(STR_NOTES),
                  notesLabel(status));
 }
 
-void NotesActivity::buildScreen(UiScreen& screen) {
+void VoiceNotesActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   screen.setContentMarginFromScreen(fui::Insets{
@@ -186,7 +186,7 @@ void NotesActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
-void NotesActivity::activateIndex(const int index) {
+void VoiceNotesActivity::activateIndex(const int index) {
   if (index < 0 || index >= listCount()) return;
   app.clearTapFlash();
   if (sync == Sync::Recheck) finishSync();  // this loop pauses while the note is open

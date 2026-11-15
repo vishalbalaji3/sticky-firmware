@@ -22,9 +22,12 @@ namespace timezones {
 const TimezoneInfo* table();
 size_t count();
 
+uint8_t pickerZoneAt(uint8_t row);
+uint8_t pickerRowForZone(uint8_t zone);
+
 // SETTINGS.clockTimezone when valid; otherwise the legacy clockUtcOffsetQ
 // mapped to the first entry with the same standard offset, falling back to
-// UTC. 255 in the setting means "never chosen".
+// Punta Arenas. 255 in the setting means "never chosen".
 uint8_t activeIndex();
 
 // Format an entry's standard offset as "UTC+HH:MM" / "UTC-H:MM" / "UTC".

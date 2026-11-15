@@ -9,6 +9,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -66,7 +67,7 @@ const int verticalPreviewTextPadding = 40;
 }  // namespace
 
 StatusBarSettingsActivity::StatusBarSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : UiListActivity("StatusBarSettings", renderer, mappedInput) {}
+    : UiListActivity("StatusBarSettings", renderer, mappedInput, false, true) {}
 
 void StatusBarSettingsActivity::onEnter() {
   UiListActivity::onEnter();
@@ -181,6 +182,8 @@ std::string StatusBarSettingsActivity::rowValueText(const int index) {
 }
 
 void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
   // Reserve the bottom band for the live status-bar preview footer (label +
   // bar) so the list never runs underneath it, plus the button-hints row below.
@@ -189,9 +192,7 @@ void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
   const int statusBarHeight = UITheme::getInstance().getStatusBarHeight();
   const auto previewFooter =
       static_cast<int16_t>(statusBarHeight + verticalPreviewTextPadding + metrics.verticalSpacing);
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight + previewFooter), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  pixelui::begin(screen, mappedInput.hasTouch() ? previewFooter : metrics.buttonHintsHeight + previewFooter);
 
   // rowItems_'s labels/actionValue were set once in onEnter(); only the live
   // value text needs refreshing here, by assigning into the existing
@@ -199,7 +200,7 @@ void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
   // items/values vector on every render.
   for (int i = 0; i < visibleItemCount; i++) {
     rowValues_[i] = rowValueText(i);
-    rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
+    rowItems_[i].subtitle = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
   }
   GUI.setCheckboxRow(rowItems_[ITEM_CHAPTER_PAGE_COUNT], SETTINGS.statusBarChapterPageCount);
   GUI.setCheckboxRow(rowItems_[ITEM_BOOK_PROGRESS_PERCENTAGE], SETTINGS.statusBarBookProgressPercentage);
@@ -214,7 +215,7 @@ void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;  // also the explicitly-set marker, see SettingsActivity
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }
 
 void StatusBarSettingsActivity::render(RenderLock&&) {
@@ -227,7 +228,7 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
 
   // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
   // indicator; the list renders through the app; the preview stays raw.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CUSTOMISE_STATUS_BAR));
+  pixelui::drawHeader(renderer, tr(STR_CUSTOMISE_STATUS_BAR), I18N.getLanguage() != Language::EN);
 
   renderUi();
 

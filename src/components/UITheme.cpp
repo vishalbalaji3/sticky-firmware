@@ -1,5 +1,6 @@
 #include "UITheme.h"
 
+#include <ChromeRegion.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
@@ -16,7 +17,7 @@
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
-#include "components/themes/roundedraff/RoundedRaffTheme.h"
+#include "util/InterfaceThemeStyle.h"
 
 UITheme UITheme::instance;
 
@@ -32,11 +33,16 @@ void UITheme::reload() {
 
 bool UITheme::supportsCoverGrid() { return HalMemory::getPsramHeap().totalBytes > 0; }
 
-bool UITheme::hasCoverGridHome() { return SETTINGS.uiTheme == CrossPointSettings::COVER_GRID && supportsCoverGrid(); }
+bool UITheme::hasCoverGridHome() {
+  return (SETTINGS.uiTheme == CrossPointSettings::COVER_GRID ||
+          SETTINGS.homeLayout == CrossPointSettings::HOME_LICORICE) &&
+         supportsCoverGrid();
+}
 
 void UITheme::drawCoverGridHome(CoverGridHomeUi& home) { home.renderUi(); }
 
 void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
+  setInterfaceSection(interfaceSection);
   if (type == CrossPointSettings::COVER_GRID && !supportsCoverGrid()) type = CrossPointSettings::LYRA;
 
   switch (type) {
@@ -46,6 +52,8 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
       currentMetrics = &BaseMetrics::values;
       break;
     case CrossPointSettings::UI_THEME::COVER_GRID:
+    // Preserve old settings files without reintroducing rounded controls.
+    case CrossPointSettings::UI_THEME::ROUNDEDRAFF:
     case CrossPointSettings::UI_THEME::LYRA: {
       // The cover home owns its screen-lifetime UI state; other screens retain Lyra styling.
       auto theme = makeUniqueNoThrow<LyraTheme>();
@@ -58,11 +66,6 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
       LOG_DBG("UI", "Using Lyra theme");
       break;
     }
-    case CrossPointSettings::UI_THEME::ROUNDEDRAFF:
-      LOG_DBG("UI", "Using RoundedRaff theme");
-      currentTheme = std::make_unique<RoundedRaffTheme>();
-      currentMetrics = &RoundedRaffMetrics::values;
-      break;
     case CrossPointSettings::UI_THEME::LYRA_3_COVERS:
       LOG_DBG("UI", "Using Lyra 3 Covers theme");
       currentTheme = std::make_unique<Lyra3CoversTheme>();
@@ -72,12 +75,26 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
   metricsValid = false;
 }
 
+void UITheme::setInterfaceSection(menufont::Section section) {
+  interfaceSection = section;
+  const auto choice = section == menufont::Section::General || section == menufont::Section::Home
+                          ? 0
+                          : SETTINGS.interfaceThemeOverrides[int(section)];
+  chrome::lightHeader = interfacetheme::light(
+      interfacetheme::resolve(SETTINGS.homeLayout, SETTINGS.interfaceThemeStyle, section, choice));
+}
+
 const ThemeMetrics& UITheme::getMetrics() const {
   // hasTouch() can flip once touch init completes after static construction, so the
   // cached copy is refreshed when the flag differs instead of copying the struct per call.
   const bool touch = gpio.hasTouch();
   if (!metricsValid || touch != metricsForTouch) {
     adjustedMetrics = *currentMetrics;
+    adjustedMetrics.listRowRadius = 0;
+    adjustedMetrics.popupCornerRadius = 0;
+    adjustedMetrics.controlRadius = 0;
+    adjustedMetrics.sheetRadius = 0;
+    adjustedMetrics.capsuleRadius = 0;
     if (touch) {
       adjustedMetrics.buttonHintsHeight = 0;
     }
@@ -128,14 +145,6 @@ Rect UITheme::getScreenSafeArea(const GfxRenderer& renderer, bool hasFrontButton
       break;
   }
   return safeArea;
-}
-
-Rect UITheme::getHeaderRect(const GfxRenderer& renderer, bool hasFrontButtonHints, bool hasSideButtonHints) {
-  const Rect safe = getScreenSafeArea(renderer, hasFrontButtonHints, hasSideButtonHints);
-  const Rect content = getContentArea(renderer);
-  const ThemeMetrics metrics = getMetrics();
-  return Rect{safe.x - content.x, safe.y - content.y + metrics.topPadding,
-              safe.width + renderer.getScreenWidth() - content.width, metrics.headerHeight};
 }
 
 std::string UITheme::getCoverThumbPath(std::string coverBmpPath, int coverHeight) {

@@ -1,4 +1,5 @@
 #include <BatteryMonitor.h>
+#include <DevInputInjector.h>
 #include <HalGPIO.h>
 #include <Logging.h>
 #include <PowerManager.h>
@@ -7,8 +8,15 @@
 #include <XteinkDetect.h>
 #include <esp_sleep.h>
 
-#if FREEINK_DEVICE_LILYGO
-#include <BoardT5S3.h>
+// Dev-build synthetic input (see lib/DevInput/DevInputInjector.h): every input
+// read consults the injector's frame first, so a host-scheduled tap or button
+// is indistinguishable from a real one downstream. Compiled out of release
+// envs, where DEV_INPUT(expr) leaves only the hardware read.
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+#define DEV_INPUT(expr) \
+  if (expr) return true;
+#else
+#define DEV_INPUT(expr)
 #endif
 
 // Global HalGPIO instance
@@ -109,19 +117,30 @@ void HalGPIO::begin() {
   _deviceType = DeviceType::X4;
 #endif
   inputMgr.begin();
-#if FREEINK_DEVICE_LILYGO
-  // T5S3 IO48 key sits behind the PCA9535 expander. Mirrors BoardT5S3::begin(), which also
-  // re-inits I2C/SPI and is unsafe to call here. inputMgr.begin() has started Wire.
-  if (BoardConfig::ACTIVE.board == BoardConfig::Board::LilyGoT5S3) {
-    BoardT5S3::setPca9535PinMode(PCA9535_IO12_BUTTON, INPUT);
-    InputManager::setButtonHook(
-        []() -> uint8_t { return BoardT5S3::readButton() ? static_cast<uint8_t>(1U << InputManager::BTN_DOWN) : 0; });
-  }
+#if FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_STICKY
+  attachActivityInterrupts();
 #endif
+
+  // InputManager::begin() returns void, and the touch probe inside it can fail
+  // silently: if the GT911 answers on neither candidate I2C address the SDK
+  // sets touchDataEnabled = false and says so only under TOUCH_PROBE_DEBUG,
+  // which no build defines. On the X4 Pro that is the whole input surface --
+  // four of its six logical buttons are unassigned pins -- so the device boots,
+  // draws every screen correctly, and ignores every finger, which is
+  // indistinguishable from nobody touching it.
+  //
+  // The board profile says whether this unit HAS a touch controller; the probe
+  // says whether it answered. Disagreement is hardware that did not come up.
+  if (BoardConfig::hasTouch() && !inputMgr.hasTouch()) {
+    LOG_ERR("GPIO", "touch controller did not answer; taps will do nothing on this boot");
+  }
 }
 
 void HalGPIO::update() {
   inputMgr.update();
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+  devinput::update();
+#endif
   const uint8_t pageButtons = inputMgr.capacitivePageButtonMask();
   capacitivePagePressed = (pageButtons & ~previousCapacitivePageButtons) != 0;
   previousCapacitivePageButtons = pageButtons;
@@ -132,25 +151,37 @@ void HalGPIO::update() {
 
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
-bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
+bool HalGPIO::isPressed(uint8_t buttonIndex) const {
+  DEV_INPUT(devinput::isPressed(buttonIndex))
+  return inputMgr.isPressed(buttonIndex);
+}
 
 void HalGPIO::prepareForDeepSleep() {
   if (!inputMgr.prepareForDeepSleep()) LOG_ERR("GPIO", "Failed to put touch controller to sleep");
 }
 
-bool HalGPIO::wasPressed(uint8_t buttonIndex) const { return inputMgr.wasPressed(buttonIndex); }
+bool HalGPIO::wasPressed(uint8_t buttonIndex) const {
+  DEV_INPUT(devinput::wasPressed(buttonIndex))
+  return inputMgr.wasPressed(buttonIndex);
+}
 
-bool HalGPIO::wasAnyPressed() const { return inputMgr.wasAnyPressed(); }
+bool HalGPIO::wasAnyPressed() const {
+  DEV_INPUT(devinput::wasAnyPressed())
+  return inputMgr.wasAnyPressed();
+}
 
-bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleased(buttonIndex); }
+bool HalGPIO::wasReleased(uint8_t buttonIndex) const {
+  DEV_INPUT(devinput::wasReleased(buttonIndex))
+  return inputMgr.wasReleased(buttonIndex);
+}
 
-bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
+bool HalGPIO::wasAnyReleased() const {
+  DEV_INPUT(devinput::wasAnyReleased())
+  return inputMgr.wasAnyReleased();
+}
 
 bool HalGPIO::rawInputActive() {
   if (inputMgr.isPowerButtonPhysicallyPressed()) return true;
-#if FREEINK_DEVICE_LILYGO
-  if (BoardConfig::ACTIVE.board == BoardConfig::Board::LilyGoT5S3 && BoardT5S3::readButton()) return true;
-#endif
   InputManager::ButtonAdcSample g1{}, g2{};
   inputMgr.readButtonAdc(g1, g2);
   // The Xteink ladder idles at the ADC full-scale rail (~4095); every button band sits below 3900.
@@ -158,9 +189,19 @@ bool HalGPIO::rawInputActive() {
   return (g1.raw >= 0 && g1.raw < kIdleRailMin) || (g2.raw >= 0 && g2.raw < kIdleRailMin);
 }
 
-unsigned long HalGPIO::getHeldTime() const { return inputMgr.getHeldTime(); }
+unsigned long HalGPIO::getHeldTime() const {
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+  if (const unsigned long t = devinput::heldTime()) return t;
+#endif
+  return inputMgr.getHeldTime();
+}
 
-unsigned long HalGPIO::getPowerButtonHeldTime() const { return inputMgr.getPowerButtonHeldTime(); }
+unsigned long HalGPIO::getPowerButtonHeldTime() const {
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+  if (devinput::isPressed(BTN_POWER)) return devinput::powerHeldTime();
+#endif
+  return inputMgr.getPowerButtonHeldTime();
+}
 
 bool HalGPIO::hasTouch() const { return inputMgr.hasTouch(); }
 
@@ -170,35 +211,61 @@ bool HalGPIO::wasHomeKeyPressed() const { return inputMgr.wasHomeKeyPressed(); }
 
 bool HalGPIO::wasHomeKeyTapped() const { return inputMgr.wasHomeKeyTapped(); }
 
-bool HalGPIO::hasToggleSwitch() const { return inputMgr.hasToggleSwitch(); }
-
-bool HalGPIO::isToggleSwitchOn() const { return inputMgr.isToggleSwitchOn(); }
-
 bool HalGPIO::wasHomeKeyLongPressed() const { return inputMgr.wasHomeKeyLongPressed(); }
 
-bool HalGPIO::wasTouchTap(float& nx, float& ny) const { return inputMgr.wasTouchTap(nx, ny); }
+bool HalGPIO::wasTouchTap(float& nx, float& ny) const {
+  DEV_INPUT(devinput::wasTouchTap(nx, ny))
+  return inputMgr.wasTouchTap(nx, ny);
+}
 
-bool HalGPIO::wasTouchDown(float& nx, float& ny) const { return inputMgr.wasTouchPressedAt(nx, ny); }
+bool HalGPIO::wasTouchDown(float& nx, float& ny) const {
+  DEV_INPUT(devinput::wasTouchDown(nx, ny))
+  return inputMgr.wasTouchPressedAt(nx, ny);
+}
 
-bool HalGPIO::wasTouchReleased() const { return inputMgr.wasTouchReleased(); }
+bool HalGPIO::wasTouchReleased() const {
+  DEV_INPUT(devinput::wasTouchReleased())
+  return inputMgr.wasTouchReleased();
+}
 
 bool HalGPIO::isTouchTapCandidate(float& nx, float& ny, unsigned long& heldMs) const {
+  DEV_INPUT(devinput::isTouchTapCandidate(nx, ny, heldMs))
   return inputMgr.isTouchTapCandidate(nx, ny, heldMs);
 }
 
-bool HalGPIO::isTouchHeldAt(float& nx, float& ny) const { return inputMgr.isTouchHeldAt(nx, ny); }
+bool HalGPIO::isTouchHeldAt(float& nx, float& ny) const {
+  DEV_INPUT(devinput::isTouchHeldAt(nx, ny))
+  return inputMgr.isTouchHeldAt(nx, ny);
+}
 
-bool HalGPIO::wasTouchLongPress(float& nx, float& ny) const { return inputMgr.wasTouchLongPress(nx, ny); }
+bool HalGPIO::wasTouchLongPress(float& nx, float& ny) const {
+  DEV_INPUT(devinput::wasTouchLongPress(nx, ny))
+  return inputMgr.wasTouchLongPress(nx, ny);
+}
 
-void HalGPIO::suppressTouchContact() { inputMgr.suppressTouchContact(); }
+void HalGPIO::suppressTouchContact() {
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+  devinput::suppressContact();
+#endif
+  inputMgr.suppressTouchContact();
+}
 
-unsigned long HalGPIO::lastTouchHeldMs() const { return inputMgr.lastTouchHeldMs(); }
+unsigned long HalGPIO::lastTouchHeldMs() const {
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+  if (const unsigned long t = devinput::lastTouchHeldMs()) return t;
+#endif
+  return inputMgr.lastTouchHeldMs();
+}
 
 bool HalGPIO::wasSwipe(float& nxStart, float& nyStart, float& nxEnd, float& nyEnd) const {
+  DEV_INPUT(devinput::wasSwipe(nxStart, nyStart, nxEnd, nyEnd))
   return inputMgr.wasSwipe(nxStart, nyStart, nxEnd, nyEnd);
 }
 
-bool HalGPIO::wasTouchActivity() const { return inputMgr.wasTouchActivity(); }
+bool HalGPIO::wasTouchActivity() const {
+  DEV_INPUT(devinput::wasTouchActivity())
+  return inputMgr.wasTouchActivity();
+}
 
 void HalGPIO::setSharedConfirmPowerShortPressEmitsPower(const bool enabled) {
   InputManager::setSharedConfirmPowerShortPressEmitsPower(enabled);
@@ -246,13 +313,8 @@ bool HalGPIO::isUsbConnected() const {
   // divider): infer external power from charging state instead. BatteryMonitor
   // picks the board's best source — charger IC status, gauge Current() sign, or
   // a /STAT pin — and reports false on boards with no battery telemetry at all.
-  // A charger IC that reports its input rail (BQ25896, SGM41562, M5 PMIC)
-  // answers directly; otherwise infer from charging state, where charge
-  // termination at 100% reads as "not connected".
+  // Caveat: charge termination at 100% reads as "not connected".
   static const BatteryMonitor battery;
-  bool known = false;
-  const bool present = battery.isExternalPowerPresent(&known);
-  if (known) return present;
   return battery.isCharging();
 }
 
@@ -265,8 +327,7 @@ bool HalGPIO::coldBootImpliesPowerButton() const {
   // post-flash boots as battery button boots, and STAT-only boards like the
   // EEGO A4 misread them the same way once the charger terminates at 100%
   // (STAT inactive reads as "no USB").
-  // The Metalio sleeps powered off and only its button turns it back on.
-  return isXteinkDevice() || BoardConfig::isPaperMono() || BoardConfig::isSticky() || BoardConfig::isMetalioEInk4();
+  return isXteinkDevice() || BoardConfig::isPaperMono() || BoardConfig::isSticky();
 }
 
 HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
@@ -278,6 +339,11 @@ HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
   if (resetReason == ESP_RST_DEEPSLEEP &&
       (wakeupCause == ESP_SLEEP_WAKEUP_GPIO || wakeupCause == ESP_SLEEP_WAKEUP_EXT1)) {
     return WakeupReason::PowerButton;
+  }
+  // A timer wake is a deep-sleep wake like any other; without this it falls
+  // through to Other and takes the full boot, splash and panel clear.
+  if (resetReason == ESP_RST_DEEPSLEEP && wakeupCause == ESP_SLEEP_WAKEUP_TIMER) {
+    return WakeupReason::Timer;
   }
   if (wakeupCause == ESP_SLEEP_WAKEUP_UNDEFINED && resetReason == ESP_RST_POWERON && !usbConnected &&
       coldBootImpliesPowerButton()) {

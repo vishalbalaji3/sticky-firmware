@@ -9,12 +9,14 @@
 #include "CrossPointSettings.h"
 #include "I18nKeys.h"
 #include "MappedInputManager.h"
+#include "apps_local/ui/PixelMenuTheme.h"
+#include "apps_local/words/DictionaryDefaults.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
 LanguageSelectActivity::LanguageSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : UiListActivity("LanguageSelect", renderer, mappedInput) {}
+    : UiListActivity("LanguageSelect", renderer, mappedInput, false, true) {}
 
 void LanguageSelectActivity::onEnter() {
   UiListActivity::onEnter();
@@ -22,8 +24,8 @@ void LanguageSelectActivity::onEnter() {
   // Open on the current language, which may sit past the first page; the first
   // screen build pulls the viewport to it (ListNav follow-on-build).
   const auto currentLang = static_cast<uint8_t>(I18N.getLanguage());
-  const auto* begin = std::begin(SORTED_LANGUAGE_INDICES);
-  const auto* end = std::end(SORTED_LANGUAGE_INDICES);
+  const auto* begin = std::begin(availableLanguages);
+  const auto* end = std::end(availableLanguages);
   const auto* it = std::find(begin, end, currentLang);
   nav.selected = (it != end) ? static_cast<int>(std::distance(begin, it)) : 0;
 
@@ -32,9 +34,9 @@ void LanguageSelectActivity::onEnter() {
   // finishes the activity immediately on selection.
   for (int i = 0; i < totalItems; ++i) {
     fui::ListItem item;
-    item.label = I18N.getLanguageName(static_cast<Language>(SORTED_LANGUAGE_INDICES[i]));
-    if (SORTED_LANGUAGE_INDICES[i] == currentLang) {
-      item.value = tr(STR_SELECTED);
+    item.label = I18N.getLanguageName(static_cast<Language>(availableLanguages[i]));
+    if (availableLanguages[i] == currentLang) {
+      item.subtitle = tr(STR_SELECTED);
     }
     item.actionValue = static_cast<int16_t>(i);
     rowItems[i] = item;
@@ -48,7 +50,7 @@ void LanguageSelectActivity::activateIndex(const int index) {
   // unrelated element on the next render.
   app.clearTapFlash();
   nav.selected = index;
-  const uint8_t langIndex = SORTED_LANGUAGE_INDICES[index];
+  const uint8_t langIndex = availableLanguages[index];
 
   {
     RenderLock lock(*this);
@@ -56,6 +58,7 @@ void LanguageSelectActivity::activateIndex(const int index) {
   }
 
   SETTINGS.language = langIndex;
+  dictionarydefaults::apply(SETTINGS);
   SETTINGS.saveToFile();
 
   // Return to previous page
@@ -63,14 +66,11 @@ void LanguageSelectActivity::activateIndex(const int index) {
 }
 
 void LanguageSelectActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, true);
+  useCompactSettingsRows();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   // Content: the safe area minus the header band GUI.drawHeader paints.
-  screen.setContentMarginFromScreen(fui::Insets{
-      static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
-      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
-      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)), static_cast<int16_t>(safe.x)});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  pixelui::begin(screen, mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
 
   // rowItems was built once in onEnter() and is reused here on every repaint.
   fui::ListProps props;
@@ -78,10 +78,6 @@ void LanguageSelectActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(totalItems);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  // Label at the value's font size: both sides of the row read as one unit.
-  // maxLines=2 also marks the style caller-owned (see textStyleUnset).
-  props.labelText = screen.theme().smallText;
-  props.labelText.maxLines = 2;
   syncListViewport(screen, props);
-  screen.list(props);
+  pixelui::list(screen, props);
 }

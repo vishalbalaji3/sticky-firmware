@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
-#include "SettingsSection.h"
-#include "activities/UiListActivity.h"
+#include "activities/UiTabListActivity.h"
+#include "apps_local/ui/PixelMenu.h"
 #include "components/OptionPopup.h"
 
 enum class SettingType { TOGGLE, ENUM, ACTION, VALUE, STRING };
@@ -21,11 +21,8 @@ enum class SettingAction {
   KOReaderSync,
   OPDSBrowser,
   Network,
-  Bluetooth,
   ClearCache,
   CheckForUpdates,
-  BrowseFiles,
-  FileTransfer,
   SdFirmwareUpdate,
   Language,
   DownloadFonts,
@@ -33,6 +30,10 @@ enum class SettingAction {
   Plugins,
   KeyboardLayouts,
   HomeButton,
+  HomeMenu,
+  QuickSettings,
+  UiPresentation,
+  ReadingFormats,
   About,
 };
 
@@ -57,8 +58,6 @@ struct SettingInfo {
   bool obfuscated = false;               // Save/load via base64 obfuscation (passwords)
   bool inTextSettings = false;           // Surfaced in the Text Settings screen; hidden from the flat Reader list
 
-  bool webHidden = false;  // Persisted normally, but omitted from the generic Web Settings API
-
   // Direct char[] string fields (for settings stored in CrossPointSettings)
   size_t stringOffset = 0;
   size_t stringMaxLen = 0;
@@ -76,11 +75,6 @@ struct SettingInfo {
 
   SettingInfo& withTextSettings() {
     inTextSettings = true;
-    return *this;
-  }
-
-  SettingInfo& withWebHidden() {
-    webHidden = true;
     return *this;
   }
 
@@ -183,40 +177,69 @@ struct SettingInfo {
   }
 };
 
-// The rows of one SettingsSection; activating a row toggles/cycles it, opens
-// its option popup, or launches its sub-screen.
-class SettingsActivity final : public UiListActivity {
-  const SettingsSection section;
-  std::vector<SettingInfo> settings;
+class SettingsActivity final : public UiTabListActivity {
+  bool categoryHome = true;
+  int selectedCategoryIndex = 0;  // Currently selected category
+  int settingsCount = 0;
+
+  // Per-category settings derived from shared list + device-only actions
+  std::vector<SettingInfo> displaySettings;
+  std::vector<SettingInfo> readerSettings;
+  std::vector<SettingInfo> controlsSettings;
+  std::vector<SettingInfo> systemSettings, librarySettings, connectivitySettings, deviceSettings;
+  const std::vector<SettingInfo>* currentSettings = nullptr;
 
   bool preserveQuickResumeTimeoutOn = false;
   bool quickResumeTimeoutAutoEnabled = false;
 
   OptionPopup optionPopup;
 
-  // Row structure (label/actionValue), rebuilt only when the setting list
-  // changes; rowValues_ holds the live value text, refreshed every
-  // buildScreen() by assigning into the existing strings.
+  // Row structure (label/actionValue) for *currentSettings, rebuilt only when
+  // the active category or a category's setting list changes
+  // (rebuildRowItems(), called from selectCategory()/rebuildSettingsLists())
+  // — not on every repaint. rowValues_ holds the live per-row value text,
+  // refreshed every buildScreen() call by assigning into the existing
+  // strings (no vector growth).
   std::vector<std::string> rowValues_;
   std::vector<freeink::ui::ListItem> rowItems_;
-
-  void rebuildSettings();
   void rebuildRowItems();
-  void toggleSelectedSetting();
-  void openSleepTimeoutPicker();
-  void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
-  void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
-  static std::string settingValueText(const SettingInfo& setting);
+  void showCategoryHome();
 
-  int listCount() const override { return static_cast<int>(settings.size()); }
+  static constexpr int categoryCount = 7;
+  static constexpr StrId categoryNames[categoryCount] = {StrId::STR_CAT_DISPLAY,           StrId::STR_SETTINGS_READING,
+                                                         StrId::STR_CAT_CONTROLS,          StrId::STR_SETTINGS_LIBRARY,
+                                                         StrId::STR_SETTINGS_CONNECTIVITY, StrId::STR_CAT_SYSTEM,
+                                                         StrId::STR_SETTINGS_DEVICE};
+  char pixelTabLabels[categoryCount + 1][32]{};  // category rows plus the Appearance destination
+
+  // --- UiTabListActivity contract ---
+  int listCount() const override { return settingsCount; }
+  int tabCount() const override { return categoryCount; }
+  int activeTab() const override { return selectedCategoryIndex; }
+  const char* tabLabel(int index) const override { return I18N.get(categoryNames[index]); }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  void onTabAction(int index) override;
+  void stepTab(int direction) override;
+  bool handleButtons() override;
   bool handleCustomInput() override;
-  const char* headerTitle() const override;
+
+  static std::string settingValueText(const SettingInfo& setting);
+  void selectCategory(int categoryIndex);
+  void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
+
+  void enterCategory(int categoryIndex);
+  void toggleCurrentSetting();
+  void openSleepTimeoutPicker();
+  void rebuildSettingsLists();
+  void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
+
+  void drawChrome() override;
   void drawFooter() override;
 
  public:
-  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, SettingsSection section);
+  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
   void onEnter() override;
+  void onExit() override;
   void render(RenderLock&& lock) override;
 };

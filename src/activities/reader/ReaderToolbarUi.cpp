@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "../../apps_local/ui/PixelMenuTheme.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "ReaderPanelRows.h"
 #include "components/UITheme.h"
 #include "components/icons/readerToolbarIcons.h"
 
@@ -42,7 +44,7 @@ constexpr int kPanelHeightMaxPercent = 72;
 constexpr int kLandscapePanelHeightPercent = 88;
 }  // namespace
 
-ReaderToolbarUi::ReaderToolbarUi(GfxRenderer& renderer) : UiAppHost(renderer) {}
+ReaderToolbarUi::ReaderToolbarUi(GfxRenderer& renderer) : UiAppHost(renderer), renderer_(renderer) {}
 
 void ReaderToolbarUi::begin() {
   resetUi();
@@ -90,6 +92,13 @@ void ReaderToolbarUi::onAction(const fui::ActionEvent& event, void* user) {
 
 void ReaderToolbarUi::screenFn(UiScreen& screen, void* user) {
   auto* self = static_cast<ReaderToolbarUi*>(user);
+  if (self->model_.textSheet) {
+    pixelui::FontScope fonts(self->uiTarget, self->renderer_, I18N.getLanguage() != Language::EN);
+    self->uiTarget.setFont(pixelui::kTitle, NOTOSERIF_18_FONT_ID);
+    self->uiTarget.setFont(4, toybox::kBookListFontId);
+    readertext::build(screen, self->model_.text, self->textWork_);
+    return;
+  }
   if (self->model_.panel) {
     self->buildPanel(screen);
   } else {
@@ -231,22 +240,24 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   const int16_t titleH = screen.target().lineHeight(tokens.titleText.font);
   const int16_t rowH =
       model_.denseRows ? static_cast<int16_t>(UITheme::getInstance().getMetrics().listRowHeight) : tokens.rowHeight;
+  // The gap is handed to the list explicitly below (listProps_.rowGap), so the
+  // sheet is sized with the gap the list draws. Before upstream set it, the list
+  // resolved a -1 sentinel to theme.listTouchRowGap on touch boards while the
+  // sheet reserved tokens.listRowGap: a six-row panel came out 30px short on
+  // every touch device. host-tests/readersheet pins panelGeometry. Card #546.
   const int16_t rowGap = model_.denseRows ? tokens.listRowGap : std::max(tokens.listRowGap, tokens.listTouchRowGap);
-  const int16_t rowStride = static_cast<int16_t>(rowH + rowGap);
   const int16_t grabberBand =
       static_cast<int16_t>(sheetProps.grabberMargin + sheetProps.grabberHeight + sheetProps.grabberInset);
   const int16_t chrome =
       static_cast<int16_t>(grabberBand + titleH + tokens.spaceMd + tokens.spaceSm + kToolRowH + tokens.spaceSm);
+  // Landscape has less height to share, so upstream gives the panel a larger
+  // share of it there (#3748).
   const bool landscape = safe.width > safe.height;
-  const int16_t target =
-      static_cast<int16_t>((safe.height * (landscape ? kLandscapePanelHeightPercent : kPanelHeightPercent)) / 100);
-  const int16_t cap =
-      static_cast<int16_t>((safe.height * (landscape ? kLandscapePanelHeightPercent : kPanelHeightMaxPercent)) / 100);
-  int sheetRows = (target - chrome + rowGap) / rowStride;
-  if (static_cast<int16_t>(chrome + (sheetRows + 1) * rowStride - rowGap) <= cap) ++sheetRows;
-  if (model_.itemCount > 0 && sheetRows > model_.itemCount) sheetRows = model_.itemCount;
-  if (sheetRows < 1) sheetRows = 1;
-  screen.sheet(sheetProps, static_cast<int16_t>(chrome + sheetRows * rowStride - rowGap));
+  const readerpanel::Geometry geo =
+      readerpanel::panelGeometry(safe.height, rowH, rowGap, chrome, model_.itemCount,
+                                 landscape ? kLandscapePanelHeightPercent : kPanelHeightPercent,
+                                 landscape ? kLandscapePanelHeightPercent : kPanelHeightMaxPercent);
+  screen.sheet(sheetProps, static_cast<int16_t>(geo.sheetHeight));
   // No blanket side inset: Screen::list() draws in the content band, and the
   // scroll track must reach the sheet's edge like a full-screen list's does.
   // The title insets itself; the rows inset via rowInset below.
@@ -273,11 +284,14 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   listProps_.rowHeight = rowH;
   listProps_.rowGap = rowGap;
   listProps_.toggleCheckbox = true;
+  listProps_.checkboxCheckmark = true;
   listProps_.toggleWidth = 28;
   listProps_.toggleHeight = 28;
-  // Keep labels and values inside the theme's selection shape.
+  // The label column starts flush with the panel title (no list-side padding
+  // on top of the sheet's own inset). Body-size text: small reads condensed
+  // and the taller row doubles as the tap target.
   listProps_.labelText = tokens.bodyText;
-  listProps_.sidePadding = tokens.listSidePadding;
+  listProps_.sidePadding = 0;
   // The list band spans the sheet's full width -- the scroll track hugs the
   // panel edge (theme bezel inset included) exactly like a full-screen list.
   // rowInset pulls the rows back to the title's spaceLg alignment.

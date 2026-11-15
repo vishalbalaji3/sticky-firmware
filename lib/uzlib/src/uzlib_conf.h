@@ -29,9 +29,4 @@
 #define UZLIB_CONF_USE_MEMCPY 0
 #endif
 
-#ifndef UZLIB_DICT_MAX_SEGS
-/* Maximum number of segments a streaming dictionary may be split into. */
-#define UZLIB_DICT_MAX_SEGS 4
-#endif
-
 #endif /* UZLIB_CONF_H_INCLUDED */

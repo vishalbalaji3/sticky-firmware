@@ -1,5 +1,6 @@
 #include "JpegToBmpConverter.h"
 
+#include <Arduino.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <JPEGDEC.h>
@@ -172,8 +173,14 @@ constexpr uint32_t FP_ONE = 1UL << 16;
 // Safe in single-threaded embedded context; never accessed concurrently.
 static HalFile* s_jpegFile = nullptr;
 static uint8_t s_jpegIoSinceYield = 0;
+static uint32_t s_jpegLastYieldMs = 0;
 
-static void yieldToIdle() { vTaskDelay(1); }
+static void yieldToIdle() {
+  const uint32_t now = millis();
+  if (now - s_jpegLastYieldMs < 250) return;
+  s_jpegLastYieldMs = now;
+  vTaskDelay(1);
+}
 
 static void yieldDuringJpegIo() {
   if (++s_jpegIoSinceYield < 4) return;
@@ -184,6 +191,7 @@ static void yieldDuringJpegIo() {
 void* bmpJpegOpen(const char* /*filename*/, int32_t* size) {
   if (!s_jpegFile || !*s_jpegFile) return nullptr;
   s_jpegIoSinceYield = 0;
+  s_jpegLastYieldMs = millis();
   s_jpegFile->seek(0);
   *size = static_cast<int32_t>(s_jpegFile->size());
   yieldDuringJpegIo();
@@ -220,6 +228,7 @@ struct BmpConvertCtx {
   int outWidth;
   int outHeight;
   bool oneBit;
+  bool gray8;
   int bytesPerRow;
   bool needsScaling;
   uint32_t scaleX_fp;  // source pixels per output pixel, 16.16 fixed-point
@@ -272,7 +281,7 @@ static void yieldDuringDecodeBlock(BmpConvertCtx* ctx) {
 static void writeOutputRow(BmpConvertCtx* ctx, const uint8_t* srcRow, int outY) {
   memset(ctx->bmpRow.get(), 0, ctx->bytesPerRow);
 
-  if (USE_8BIT_OUTPUT && !ctx->oneBit) {
+  if ((ctx->gray8 || USE_8BIT_OUTPUT) && !ctx->oneBit) {
     for (int x = 0; x < ctx->outWidth; x++) {
       ctx->bmpRow[x] = adjustPixel(srcRow[x]);
     }
@@ -392,7 +401,7 @@ static void finishSmoothUpscale(BmpConvertCtx* ctx) {
 static void flushScaledRow(BmpConvertCtx* ctx) {
   memset(ctx->bmpRow.get(), 0, ctx->bytesPerRow);
 
-  if (USE_8BIT_OUTPUT && !ctx->oneBit) {
+  if ((ctx->gray8 || USE_8BIT_OUTPUT) && !ctx->oneBit) {
     for (int x = 0; x < ctx->outWidth; x++) {
       const uint8_t gray = (ctx->rowCount[x] > 0) ? (ctx->rowAccum[x] / ctx->rowCount[x]) : 0;
       ctx->bmpRow[x] = adjustPixel(gray);
@@ -512,8 +521,8 @@ int bmpDrawCallback(JPEGDRAW* pDraw) {
 
 // Internal implementation with configurable target size and bit depth
 bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& bmpOut, int targetWidth,
-                                                     int targetHeight, bool oneBit, bool crop,
-                                                     bool originalThresholds) {
+                                                     int targetHeight, bool oneBit, bool crop, bool originalThresholds,
+                                                     bool gray8) {
   LOG_DBG("JPG", "Converting JPEG to %s BMP (target: %dx%d)", oneBit ? "1-bit" : "2-bit", targetWidth, targetHeight);
 
   if (ESP.getFreeHeap() < MIN_FREE_HEAP) {
@@ -605,7 +614,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
 
   // Write BMP header with output dimensions
   int bytesPerRow;
-  if (USE_8BIT_OUTPUT && !oneBit) {
+  if ((gray8 || USE_8BIT_OUTPUT) && !oneBit) {
     writeBmpHeader8bit(bmpOut, outWidth, outHeight);
     bytesPerRow = (outWidth + 3) / 4 * 4;
   } else if (oneBit) {
@@ -623,6 +632,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
   ctx.outWidth = outWidth;
   ctx.outHeight = outHeight;
   ctx.oneBit = oneBit;
+  ctx.gray8 = gray8;
   ctx.bytesPerRow = bytesPerRow;
   ctx.needsScaling = needsScaling;
   ctx.scaleX_fp = scaleX_fp;
@@ -679,7 +689,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
       LOG_ERR("JPG", "OOM: Atkinson1BitDitherer");
       return false;
     }
-  } else if (!USE_8BIT_OUTPUT) {
+  } else if (!gray8 && !USE_8BIT_OUTPUT) {
     if (USE_ATKINSON) {
       ctx.atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>(outWidth, originalThresholds);
       if (!ctx.atkinsonDitherer || !ctx.atkinsonDitherer->isValid()) {
@@ -731,4 +741,13 @@ bool JpegToBmpConverter::jpegFileToBmpStreamWithSize(HalFile& jpegFile, Print& b
 bool JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(HalFile& jpegFile, Print& bmpOut, int targetMaxWidth,
                                                          int targetMaxHeight) {
   return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true);
+}
+
+bool JpegToBmpConverter::jpegFileTo1BitBmpStreamFitWithin(HalFile& jpegFile, Print& bmpOut, int maxWidth,
+                                                          int maxHeight) {
+  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, maxWidth, maxHeight, true, false);
+}
+
+bool JpegToBmpConverter::jpegFileToGrayBmpStreamNative(HalFile& file, Print& out) {
+  return jpegFileToBmpStreamInternal(file, out, 0, 0, false, false, false, true);
 }

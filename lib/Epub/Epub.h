@@ -13,12 +13,14 @@
 #include "Epub/css/CssParser.h"
 
 class ZipFile;
+class ZipEntryReader;
 
 class Epub {
  public:
   struct SyncMetadata {
     std::string isbn;
     std::string asin;
+    std::string title, author, genre;
     std::string series;
     std::optional<float> seriesIndex;
   };
@@ -61,7 +63,7 @@ class Epub {
   ~Epub() = default;
   std::string& getBasePath() { return contentBasePath; }
   bool load(bool buildIfMissing = true, bool skipLoadingCss = false);
-  bool loadMetadata(std::string& title, std::string& author);
+  bool loadMetadata(std::string& title, std::string& author, SyncMetadata* details = nullptr);
   bool loadSyncMetadata(SyncMetadata& metadata);
   bool clearCache() const;
   void setupCacheDir() const;
@@ -83,6 +85,8 @@ class Epub {
                                    bool trailingNullByte = false) const;
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,
                                 bool allowEarlyStop = false) const;
+  // Incremental ZIP access; converted text and encrypted entries use other readers.
+  bool openItemReader(const std::string& itemHref, ZipEntryReader& reader) const;
   // Extract an item to a file on SD. On failure the partial file is removed.
   bool extractItemToFile(const std::string& itemHref, const std::string& destPath) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
@@ -93,8 +97,6 @@ class Epub {
   int getSpineIndexForTocIndex(int tocIndex) const;
   int getTocIndexForSpineIndex(int spineIndex) const;
   size_t getCumulativeSpineItemSize(int spineIndex) const;
-  // First spine index whose cumulative size reaches `bytes`, or -1 past the end.
-  int getSpineIndexForSize(size_t bytes) const;
   int getSpineIndexForTextReference() const;
 
   size_t getBookSize() const;

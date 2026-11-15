@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "../../chapter_html_slim_parser/stubs/Print.h"
+
 inline constexpr int O_WRONLY = 1, O_CREAT = 2, O_TRUNC = 4, O_APPEND = 8, O_RDWR = 16, O_AT_END = 32;
 
 namespace fake {
@@ -26,6 +28,7 @@ inline int failTruncate = -1;
 inline int failRename = -1;
 inline int failAlloc = -1;
 inline bool failDirectorySeek = false;
+inline int failDirectoryRead = -1;
 inline std::string failClosePath;
 inline std::string failWritePath;
 inline unsigned parses = 0;
@@ -57,6 +60,7 @@ inline void reset() {
   failRename = -1;
   failAlloc = -1;
   failDirectorySeek = false;
+  failDirectoryRead = -1;
   failClosePath.clear();
   failWritePath.clear();
   parses = 0;
@@ -96,7 +100,7 @@ inline void duplicateDirectoryEntry(const std::string& path) {
 
 }  // namespace fake
 
-class HalFile {
+class HalFile : public Print {
  public:
   std::shared_ptr<fake::Node> node;
   std::string path;
@@ -132,6 +136,10 @@ class HalFile {
     file.node = fake::files[file.path];
     fake::directoryEntriesByPath[file.path]++;
     return file;
+  }
+  HalFile openNextFile(bool& error) {
+    error = fake::fail(fake::failDirectoryRead);
+    return error ? HalFile{} : openNextFile();
   }
   size_t getName(char* out, const size_t size) {
     const std::string name = path.substr(path.find_last_of('/') + 1);
@@ -173,7 +181,8 @@ class HalFile {
     pos += size;
     return static_cast<int>(size);
   }
-  size_t write(const uint8_t* data, size_t size) {
+  size_t write(uint8_t byte) override { return write(&byte, 1); }
+  size_t write(const uint8_t* data, size_t size) override {
     if (size == 0) return 0;
     fake::writesByPath[path]++;
     if (!fake::failWritePath.empty() && path == fake::failWritePath) {

@@ -1,0 +1,3 @@
+add_executable(StickyButtonInputTest StickyButtonInputTest.cpp)
+target_link_libraries(StickyButtonInputTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(StickyButtonInputTest)

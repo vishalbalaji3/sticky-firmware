@@ -1,6 +1,7 @@
 #include "BmpViewerActivity.h"
 
 #include <Bitmap.h>
+#include <ContentVisibility.h>
 #include <Epub/converters/JpegToFramebufferConverter.h>
 #include <Epub/converters/PngToFramebufferConverter.h>
 #include <FsHelpers.h>
@@ -8,12 +9,14 @@
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <KOReaderDocumentId.h>
 #include <Memory.h>
 
 #include <algorithm>
+#include <ctime>
 
 #include "CrossPointSettings.h"
-#include "activities/util/ConfirmationActivity.h"
+#include "apps_local/reading/ReadingStatsStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -35,12 +38,6 @@ RenderConfig fitImage(const ImageDimensions& dimensions, const GfxRenderer& rend
                       height};
   config.useExactDimensions = true;
   return config;
-}
-
-bool overlaySleepMode() {
-  const uint8_t mode = SETTINGS.sleepScreen;
-  return mode == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM ||
-         mode == CrossPointSettings::SLEEP_SCREEN_MODE::COVER_TRANSPARENT;
 }
 }  // namespace
 
@@ -101,7 +98,8 @@ void BmpViewerActivity::loadSiblingImages() {
 
 bool BmpViewerActivity::canSetSleepCover() const {
   return FsHelpers::hasBmpExtension(filePath) || FsHelpers::hasJpgExtension(filePath) ||
-         (overlaySleepMode() && FsHelpers::hasPngExtension(filePath));
+         (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM &&
+          FsHelpers::hasPngExtension(filePath));
 }
 
 bool BmpViewerActivity::renderImage() {
@@ -160,6 +158,7 @@ bool BmpViewerActivity::renderImage() {
 }
 
 void BmpViewerActivity::onEnter() {
+  flushImageStats();
   Activity::onEnter();
 
   if (siblingImages.empty() && !filePath.empty()) {
@@ -172,7 +171,9 @@ void BmpViewerActivity::onEnter() {
   GUI.fillPopupProgress(renderer, popupRect, 20);  // Initial 20% progress
   if (FsHelpers::hasPngExtension(filePath) || FsHelpers::hasJpgExtension(filePath)) {
     renderer.clearScreen();
-    if (!renderImage()) {
+    const bool imageReady = renderImage();
+    if (imageReady) beginImageStats();
+    if (!imageReady) {
       renderer.clearScreen();
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
       const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
@@ -230,6 +231,7 @@ void BmpViewerActivity::onEnter() {
         return;
       }
 
+      beginImageStats();
       // Draw UI hints on the base layer
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       if (bitmap.hasGreyscale()) {
@@ -294,7 +296,27 @@ void BmpViewerActivity::onEnter() {
   }
 }
 
+void BmpViewerActivity::beginImageStats() {
+  if (!(SETTINGS.readingFormats & 32) || content::hiddenContent(filePath)) return;
+  trackedImage.reserve(512);
+  trackedImage = filePath;
+  statsStartedMs = millis();
+  statsEpoch = std::time(nullptr);
+}
+void BmpViewerActivity::flushImageStats() {
+  if (statsEpoch <= 0) return;
+  const auto epoch = statsEpoch;
+  statsEpoch = 0;
+  const uint32_t seconds = std::min<uint32_t>(120, (millis() - statsStartedMs) / 1000);
+  if (seconds < 10 || !(SETTINGS.readingFormats & 32)) return;
+  const auto document = KOReaderDocumentId::calculate(trackedImage);
+  if (document.size() != 32) return;
+  const auto name = FsHelpers::getFileNameWithoutExtension(std::string_view(trackedImage));
+  // Images can contribute viewing time when explicitly enabled, never books.
+  readingstats::recordSession(document.c_str(), name.c_str(), "", epoch, seconds, 1, 0);
+}
 void BmpViewerActivity::onExit() {
+  flushImageStats();
   Activity::onExit();
   renderer.clearScreen();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
@@ -391,7 +413,8 @@ void BmpViewerActivity::doSetSleepCover() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
   const bool jpeg = FsHelpers::hasJpgExtension(filePath);
-  const bool transparentMode = !jpeg && overlaySleepMode();
+  const bool transparentMode =
+      !jpeg && SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::TRANSPARENT_CUSTOM;
   if (!canSetSleepCover()) return;
 
   const char* destination =
@@ -474,25 +497,8 @@ void BmpViewerActivity::loop() {
     return;
   }
 
-  // Touch boards draw no button hints; long-press stands in for Confirm, as for file browser actions.
-  int touchX = 0;
-  int touchY = 0;
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenLongPress(touchX, touchY)) {
-    if (!canSetSleepCover()) return;
-
-    auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, tr(STR_SET_SLEEP_COVER_CONFIRM),
-                                                                filePath.substr(filePath.find_last_of('/') + 1));
-    if (!confirmation) {
-      LOG_ERR("BMP", "OOM: sleep cover confirmation (%zu bytes)", sizeof(ConfirmationActivity));
-      return;
-    }
-    startActivityForResult(std::move(confirmation), [this](const ActivityResult& result) {
-      if (result.isCancelled) {
-        onEnter();
-        return;
-      }
-      doSetSleepCover();
-    });
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (canSetSleepCover()) doSetSleepCover();
     return;
   }
 

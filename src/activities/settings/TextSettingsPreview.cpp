@@ -9,6 +9,7 @@
 #include <I18n.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <string>
 #include <utility>
 
@@ -62,19 +63,19 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
 
 }  // namespace
 
-void renderPreview(const GfxRenderer& renderer, PreviewLayout& layout, int previewPadding, int labelGap, Rect bounds,
-                   const char* caption) {
-  const int top = bounds.y;
-  const int height = bounds.height;
-  const int left = bounds.x + previewPadding;
-  const int width = bounds.width - (previewPadding * 2);
+void renderPreview(const GfxRenderer& renderer, PreviewLayout& layout, int previewPadding, int labelGap, int top,
+                   int height, const char* familyName, const char* sizeName) {
+  const int left = previewPadding;
+  const int width = renderer.getScreenWidth() - (previewPadding * 2);
   if (width <= 0 || height <= 0) return;
 
   const int labelH = renderer.getTextHeight(UI_10_FONT_ID);
   const int labelReserved = labelH + labelGap + previewPadding;
 
+  char labelBuf[128];
+  snprintf(labelBuf, sizeof(labelBuf), "%s · %s", familyName, sizeName);
   const int labelY = top + height - previewPadding - labelH;
-  renderer.drawText(UI_10_FONT_ID, left, labelY, caption);
+  renderer.drawText(UI_10_FONT_ID, left, labelY, labelBuf);
 
   const int fontId = SETTINGS.getReaderFontId();
   if (fontId == 0) return;
@@ -88,7 +89,6 @@ void renderPreview(const GfxRenderer& renderer, PreviewLayout& layout, int previ
 
   const float compression = SETTINGS.getReaderLineCompression();
   const int lineAdvance = std::max(1, renderer.getLineHeight(fontId, compression));
-  const int paragraphGap = SETTINGS.extraParagraphSpacing ? lineAdvance / 2 : 0;
 
   // Re-lay-out (and re-prewarm glyphs) only when a layout-affecting setting or the
   // geometry changed; else reuse the cache. The prewarm inputs are (fontId, constant
@@ -116,16 +116,13 @@ void renderPreview(const GfxRenderer& renderer, PreviewLayout& layout, int previ
     layout.key = key;
   }
 
-  // Draw the sample twice so the paragraph gap is visible
+  // A single sample leaves the controls visible below the preview.
   int y = top + previewPadding;
   const int textBottomLimit = top + height - labelReserved;
-  for (int paragraph = 0; paragraph < 2; paragraph++) {
-    for (const auto& line : layout.lines) {
-      if (y + lineH > textBottomLimit) return;
-      line->render(renderer, fontId, textLeft, y);
-      y += lineAdvance;
-    }
-    y += paragraphGap;
+  for (const auto& line : layout.lines) {
+    if (y + lineH > textBottomLimit) return;
+    line->render(renderer, fontId, textLeft, y);
+    y += lineAdvance;
   }
 }
 

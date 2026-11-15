@@ -764,3 +764,20 @@ Book moves rename the store and its `.deleted` journal (plus recovery sidecars)
 together. The stored source path is informational and is refreshed on the next
 save; the current file path selects the store. Local book deletion cleans up all
 of these sidecars but preserves the independent `My Clippings.txt` export.
+
+## `sync-state.bin` (Sticky, version 1)
+
+A 40-byte companion to `progress.bin`; the legacy progress format is unchanged.
+All integers below are little-endian. Byte 0–2 is ASCII `SYN`; byte 3 is version
+`1`; bytes 4/5 are known-baseline/unsent-intent booleans; bytes 6/7 are zero.
+Bytes 8–15 contain an FNV-1a-64 hash of server URL, username and document ID,
+separated by NUL bytes. Bytes 16–23 contain the last accepted server revision.
+Bytes 24–31 hash the exact legacy progress bytes. Bytes 32–39 hash bytes 0–31.
+Hashes detect mismatches/corruption; they are not authentication.
+
+Each file uses a temporary write and rename. The pair is not a transaction:
+interruption between writes can leave a progress/hash mismatch, which loads as
+unknown and requires a position choice instead of permitting an automatic overwrite.
+Missing/invalid records and changed account/document identities also require a choice.
+Reader cache-clear preserves the in-memory baseline when restoring progress;
+external deletion of the cache does not.

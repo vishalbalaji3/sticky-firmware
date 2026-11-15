@@ -13,9 +13,10 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
-#include "ReaderLineSpacing.h"
 #include "SdCardFontSystem.h"
 #include "TextSettingsPreview.h"
+#include "apps_local/ui/PixelMenuTheme.h"
+#include "apps_local/ui/SettingsMenuStyle.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -28,8 +29,8 @@ constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_L
 constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
     StrId::STR_LINE_SPACING,          StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
     StrId::STR_PARAGRAPH_INDENTATION, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
-constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION_NO_PREVIEW,
-                                        StrId::STR_EMBEDDED_STYLE_NO_PREVIEW, StrId::STR_TEXT_AA_NO_PREVIEW};
+constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION, StrId::STR_EMBEDDED_STYLE,
+                                        StrId::STR_TEXT_AA};
 
 int findCurrentFontIndex(const SdCardFontRegistry* registry, const char* sdFontFamilyName, uint8_t fontFamily) {
   if (sdFontFamilyName[0] != '\0' && registry) {
@@ -45,6 +46,7 @@ int findCurrentFontIndex(const SdCardFontRegistry* registry, const char* sdFontF
   return fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? fontFamily : 0;
 }
 
+constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE};
 constexpr StrId WORD_SPACING_IDS[] = {StrId::STR_SPACING_50_PERCENT,  StrId::STR_SPACING_75_PERCENT,
                                       StrId::STR_SPACING_100_PERCENT, StrId::STR_SPACING_125_PERCENT,
                                       StrId::STR_SPACING_150_PERCENT, StrId::STR_SPACING_175_PERCENT,
@@ -73,15 +75,15 @@ void TextSettingsActivity::onEnter() {
   UiTabListActivity::onEnter();
 
   metrics_ = UITheme::getInstance().getMetrics();
-  const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  const int safeBottom = safeArea.y + safeArea.height;
-  afterHeader = safeArea.y + metrics_.topPadding + metrics_.headerHeight + metrics_.verticalSpacing;
-  const int usableHeight = safeBottom - afterHeader - metrics_.verticalSpacing;
+  afterHeader =
+      pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).header.bottom() + metrics_.verticalSpacing;
+  bottomReserved = metrics_.buttonHintsHeight + metrics_.verticalSpacing;
+  usableHeight = renderer.getScreenHeight() - afterHeader - bottomReserved;
   previewHeight = usableHeight * metrics_.previewHeightPercent / 100;
 
   fonts_.clear();
   fonts_.reserve(CrossPointSettings::BUILTIN_FONT_COUNT + (registry_ ? registry_->getFamilyCount() : 0));
-  fonts_.push_back({I18N.get(StrId::STR_NOTO_SANS), true, static_cast<uint8_t>(CrossPointSettings::NOTOSANS)});
+  fonts_.push_back({I18N.get(StrId::STR_NOTO_SERIF), true, static_cast<uint8_t>(CrossPointSettings::NOTOSERIF)});
   if (registry_) {
     const auto& families = registry_->getFamilies();
     for (int i = 0; i < static_cast<int>(families.size()); i++) {
@@ -205,14 +207,20 @@ bool TextSettingsActivity::handleButtons() {
 }
 
 void TextSettingsActivity::buildScreen(UiScreen& screen) {
-  const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  uiTarget.setFont(pixelui::kSmall, UI_12_FONT_ID);
+  uiTarget.setFont(4, UI_10_FONT_ID);
+  // Content sits below the preview pane (render() draws header + preview
+  // directly) and above the caption band + button hints.
   const int tabTop = afterHeader + previewHeight;
-  const int rightInset = renderer.getScreenWidth() - (safeArea.x + safeArea.width);
-  const int bottomInset = renderer.getScreenHeight() - (safeArea.y + safeArea.height);
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(tabTop), static_cast<int16_t>(rightInset),
-                                                static_cast<int16_t>(bottomInset), static_cast<int16_t>(safeArea.x)});
+  const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
+  screen.setContentMarginFromScreen(
+      fui::Insets{static_cast<int16_t>(tabTop), 0, static_cast<int16_t>(bottomReserved + captionHeight), 0});
 
-  buildTabBar(screen);
+  screen.insetContent(fui::Insets{0, 12, 0, 12});
+  fui::TabItem tabs[4];
+  for (int i = 0; i < 4; ++i) tabs[i] = fui::tabItem(i, activeTab() == i, true, tabLabel(i));
+  pixelui::tabs(screen, tabs, 4, ACTION_TAB, 4);
 
   // rowItems_ (label/actionValue) was built by rebuildRowItems() when the tab
   // was last switched; only the live value text needs refreshing here, by
@@ -233,7 +241,7 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
       default:
         break;
     }
-    rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
+    rowItems_[i].subtitle = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
     if (tab_ == Tab::Style) {
       GUI.setCheckboxRow(rowItems_[i], styleRowChecked(i));
     } else if (tab_ == Tab::Layout && i == static_cast<int>(LayoutRow::ParaSpacing)) {
@@ -246,14 +254,30 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(rowItems_.size());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.valueInset = 8;               // air between the value and the row edge
-  // Titles match the value's font size (smallText) so both sides of a row
-  // read as one unit; labels that still don't fit wrap onto a second line.
-  // maxLines=2 also marks the style explicitly set (see SettingsActivity).
-  props.labelText = screen.theme().smallText;
-  props.labelText.maxLines = 2;
-  syncTabListViewport(screen, props);
-  screen.list(props);
+  settingsui::styleRows(props);
+  props.labelText.font = 4;
+  props.labelText.maxLines = 1;
+  props.rowHeight = 68;
+  props.rowGap = 0;
+  props.sidePadding = 14;
+  props.separatorPaint = fui::Paint::solid(fui::Color::Black);
+  if (tab_ == Tab::Family || tab_ == Tab::Size) {
+    for (int i = 0; i < count; ++i) {
+      rowItems_[i].toggle = true;
+      rowItems_[i].toggleChecked = i == (tab_ == Tab::Family ? currentFamilyIndex_ : currentSizeIndex_);
+    }
+    props.toggleCheckbox = true;
+    props.toggleWidth = props.toggleHeight = 34;
+    props.selectionMarker = fui::SelectionMarker::Underline;
+    props.markerThickness = 2;
+    props.checkboxCheckmark = true;
+    props.trailingCentered = true;
+    props.rowStyles.selected = props.rowStyles.normal;
+  }
+  // Call Screen directly to retain this screen's compact, explicit geometry.
+  screen.syncListViewport(activeNav(), props, listCount(), 1);
+  props.selectedIndex = activeNav().selected - 1;
+  pixelui::list(screen, props);
 }
 
 const char* TextSettingsActivity::confirmLabelText() const {
@@ -272,7 +296,9 @@ const char* TextSettingsActivity::confirmLabelText() const {
 }
 
 void TextSettingsActivity::drawChrome() {
-  GUI.drawHeader(renderer, UITheme::getInstance().getHeaderRect(renderer, true, false), tr(STR_TEXT_SETTINGS));
+  const auto pageWidth = renderer.getScreenWidth();
+
+  pixelui::drawHeader(renderer, tr(STR_TEXT_SETTINGS), I18N.getLanguage() != Language::EN);
 
   const char* familyName = (currentFamilyIndex_ >= 0 && currentFamilyIndex_ < static_cast<int>(fonts_.size()))
                                ? fonts_[currentFamilyIndex_].name.c_str()
@@ -280,22 +306,21 @@ void TextSettingsActivity::drawChrome() {
   const char* sizeName = (currentSizeIndex_ >= 0 && currentSizeIndex_ < static_cast<int>(sizes_.size()))
                              ? sizes_[currentSizeIndex_].name.c_str()
                              : "";
-  char labelBuf[128];
-  snprintf(labelBuf, sizeof(labelBuf), "%s \"%s, %s\"", tr(STR_PREVIEW), familyName, sizeName);
-  const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  const Rect previewBounds{safeArea.x, afterHeader, safeArea.width, previewHeight};
-  const auto [savedX, savedY, savedWidth, savedHeight] = renderer.getClipRect();
-  const int clipLeft = std::max(previewBounds.x, savedX);
-  const int clipTop = std::max(previewBounds.y, savedY);
-  const int clipRight = std::min(previewBounds.x + previewBounds.width, savedX + savedWidth);
-  const int clipBottom = std::min(previewBounds.y + previewBounds.height, savedY + savedHeight);
-  renderer.setClipRect(clipLeft, clipTop, std::max(0, clipRight - clipLeft), std::max(0, clipBottom - clipTop));
-  textsettings::renderPreview(renderer, previewLayout_, metrics_.previewPadding, metrics_.verticalSpacing,
-                              previewBounds, labelBuf);
-  renderer.setClipRect(savedX, savedY, savedWidth, savedHeight);
+  textsettings::renderPreview(renderer, previewLayout_, metrics_.previewPadding, metrics_.verticalSpacing, afterHeader,
+                              previewHeight, familyName, sizeName);
 }
 
 void TextSettingsActivity::drawFooter() {
+  if (!focusedRowHasNoPreview()) {
+    renderer.drawText(UI_10_FONT_ID, metrics_.previewPadding,
+                      afterHeader + usableHeight - renderer.getTextHeight(UI_10_FONT_ID), tr(STR_SR_PREVIEW_CHANGES));
+  }
+  if (focusedRowHasNoPreview()) {
+    const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
+    const int capY = afterHeader + usableHeight - captionHeight + metrics_.verticalSpacing;
+    renderer.drawText(UI_10_FONT_ID, metrics_.previewPadding, capY, tr(STR_NOT_IN_PREVIEW));
+  }
+
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabelText(), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
@@ -458,7 +483,7 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
   switch (static_cast<LayoutRow>(row)) {
     case LayoutRow::LineSpacing: {
       const uint8_t v = SETTINGS.lineSpacing;
-      return I18N.get(LINE_SPACING_IDS[v < std::size(LINE_SPACING_IDS) ? v : CrossPointSettings::LINE_SPACING_120]);
+      return v < std::size(LINE_SPACING_IDS) ? I18N.get(LINE_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);
     }
     case LayoutRow::ParaIndentation: {
       const int spaces = std::clamp<int>(SETTINGS.paragraphIndentSpaces, 0, 5);
@@ -519,6 +544,15 @@ bool TextSettingsActivity::styleRowChecked(int row) const {
     default:
       return false;
   }
+}
+
+// The single sample cannot show a paragraph gap; some style choices also require a book.
+bool TextSettingsActivity::focusedRowHasNoPreview() const {
+  if (ringPos() == 0) return false;
+  if (tab_ == Tab::Layout) return ringPos() - 1 == static_cast<int>(LayoutRow::ParaSpacing);
+  if (tab_ != Tab::Style) return false;
+  const StyleRow row = static_cast<StyleRow>(ringPos() - 1);
+  return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing;
 }
 
 void TextSettingsActivity::switchTab(const int direction) {

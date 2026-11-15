@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 
+#include "../../apps_local/readertext/ReaderTextSheet.h"
 #include "components/UiAppHost.h"
 #include "components/lists/list.h"
 
@@ -16,6 +17,7 @@ class MappedInputManager;
 //    Contents / Text / More tile row; the page above it stays untouched.
 //  - Panel: a taller bottom sheet with a title, a paged row list (name left,
 //    value right) and the same tile row as a switcher.
+//  - Text: fork-owned bottom controls over the real page, with Font/Layout/Style tabs.
 //
 // EpubReaderActivity owns the state (which overlay, selection, row contents)
 // and the physical-button handling; this class owns the layout, the tap
@@ -27,6 +29,8 @@ class ReaderToolbarUi : public UiAppHost {
   enum class Event { None = 0, Dismiss = 1, Tool = 2, PrevChapter = 3, NextChapter = 4, Scrub = 5, Row = 6 };
 
   struct Model {
+    bool textSheet = false;  // The current page is the preview; no replacement header/sample.
+    readertext::Model text;
     bool panel = false;  // false = toolbar, true = a Contents/Text/More panel
     // Toolbar
     const char* chapterTitle = nullptr;
@@ -84,6 +88,7 @@ class ReaderToolbarUi : public UiAppHost {
   void buildToolRow(UiScreen& screen, freeink::ui::LayoutAnchor anchor, int16_t sideInset);
 
   Model model_;
+  GfxRenderer& renderer_;
   Routed pending_;
   freeink::ui::ListNav nav_;
 
@@ -98,4 +103,5 @@ class ReaderToolbarUi : public UiAppHost {
   freeink::ui::ButtonProps stepProps_;
   freeink::ui::ListProps listProps_;
   freeink::ui::Rect pageIndicatorRect_{};
+  readertext::Work textWork_;
 };

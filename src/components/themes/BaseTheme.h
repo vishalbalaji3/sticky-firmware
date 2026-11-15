@@ -12,7 +12,6 @@ struct RecentBook;
 namespace freeink {
 namespace ui {
 struct HeaderProps;
-struct Rect;
 struct BitmapRef;
 struct ListItem;
 }  // namespace ui
@@ -131,6 +130,9 @@ struct ThemeMetrics {
   int capsuleRadius;
 };
 
+// fork-local seam: Games and Apps are appended last, so every value above keeps
+// its number and this merges as an addition rather than a renumbering. Their
+// bitmaps are in src/apps_local/ui/ToyboxIcons.h; see LOCAL_SCOPE.md.
 enum UIIcon {
   None = 0,
   Folder,
@@ -147,7 +149,11 @@ enum UIIcon {
   Hotspot,
   Bookmark,
   Usb,
-  Blocks
+  Blocks,
+  // FORK: appended after every upstream value, so adding one upstream never
+  // renumbers theirs. See LOCAL_SCOPE.md.
+  Games,
+  Apps
 };
 
 // Default theme implementation (Classic Theme)
@@ -167,7 +173,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .listWithSubtitleRowHeight = 50,
                                  .listRowGap = 0,
                                  .listRowRadius = 0,
-                                 .listInset = 0,
+                                 // fork-local: 12, not 0. Full-bleed, the inverted bar ran to
+                                 // 3px of the left edge and 9px of the right (the scroll track).
+                                 .listInset = 12,
                                  .listSidePadding = 20,
                                  .listSelectionStyle = 0,  // invert fill
                                  .listScrollWidth = 4,
@@ -234,6 +242,7 @@ class BaseTheme {
   virtual ~BaseTheme() = default;
 
   // Component drawing methods
+  static freeink::ui::BitmapRef checkboxIcon(bool checked);
   static void setCheckboxRow(freeink::ui::ListItem& item, bool checked);
   static void drawCoverPlaceholder(const GfxRenderer& renderer, Rect rect);
   // Draws a pre-dithered cover thumb 1:1, centered and clipped to fill the
@@ -276,14 +285,6 @@ class BaseTheme {
   // drawHeader). The label strings point at internal static buffers refreshed
   // per call (headers draw on the single render task).
   static void applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::HeaderProps& props);
-  // The header band every screen draws in: the caller's full-width rect inset
-  // by the board's side insets, its top edge lowered by the board's
-  // headerOffsetY (bottom edge fixed, so content below keeps its boundary).
-  // Sets props.bleed so the band's fill and rule still span `rect`, and widens
-  // the status line's edge inset to clear rounded corners. Call after
-  // applyHeaderStatus.
-  static freeink::ui::Rect headerBand(const GfxRenderer& renderer, freeink::ui::Rect rect,
-                                      freeink::ui::HeaderProps& props);
   // Edge inset drawHeader uses for the clock/battery status line (detached
   // layouts hug the corner with a legacy 12px inset instead of the padding).
   static int headerStatusInset();
@@ -294,9 +295,10 @@ class BaseTheme {
                                    bool& bufferRestored, std::function<bool()> storeCoverBuffer) const;
   virtual void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                               const std::function<std::string(int index)>& buttonLabel,
-                              const std::function<UIIcon(int index)>& rowIcon) const;
+                              const std::function<UIIcon(int index)>& rowIcon, int rowSpacing = -1,
+                              int rowHeight = -1) const;
   static void drawSelectionHandle(const GfxRenderer& renderer, Rect rect, bool left);
-  static void drawSelectionActions(const GfxRenderer& renderer, Rect rect, int count = 3, int firstAction = 0);
+  static void drawSelectionActions(const GfxRenderer& renderer, Rect rect, bool singleWord);
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   static void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage, const int pageCount,

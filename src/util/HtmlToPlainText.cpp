@@ -14,15 +14,10 @@ bool isTagStart(const std::string& input, size_t pos) {
   return next == '/' || next == '!' || next == '?' || std::isalpha(next);
 }
 
-enum class TagBreak : uint8_t { None, Line, Paragraph, HeadingOpen, HeadingClose };
+enum class TagBreak : uint8_t { None, Line, Paragraph };
 
 TagBreak tagBreak(const std::string& input, size_t start, size_t end) {
-  // A closing tag is marked by the '/' the name scan below skips.
-  bool closing = false;
-  while (start < end && (input[start] == '/' || std::isspace(static_cast<unsigned char>(input[start])))) {
-    if (input[start] == '/') closing = true;
-    start++;
-  }
+  while (start < end && (input[start] == '/' || std::isspace(static_cast<unsigned char>(input[start])))) start++;
   const size_t nameStart = start;
   // Alphanumeric, not alphabetic: a name scan that stops at the first digit
   // reads "h1" as "h", so none of the heading names below could ever match and
@@ -40,38 +35,34 @@ TagBreak tagBreak(const std::string& input, size_t start, size_t end) {
     return true;
   };
 
-  if (equals("h1") || equals("h2") || equals("h3") || equals("h4") || equals("h5") || equals("h6")) {
-    // A heading keeps its role in text: it is a label line of its own, drawn in
-    // bold by the plain-text path.
-    return closing ? TagBreak::HeadingClose : TagBreak::HeadingOpen;
-  }
-  if (equals("p") || equals("hr")) {
+  if (equals("p") || equals("h1") || equals("h2") || equals("h3") || equals("h4") || equals("h5") || equals("h6") ||
+      equals("hr")) {
     return TagBreak::Paragraph;
   }
   if (equals("br") || equals("div") || equals("li") || equals("tr")) return TagBreak::Line;
   return TagBreak::None;
 }
 
-void appendCodepoint(std::string& output, size_t& written, uint32_t codepoint) {
+void appendCodepoint(std::string& output, uint32_t codepoint) {
   if (codepoint == 0 || codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return;
   if (codepoint <= 0x7F) {
-    output[written++] = static_cast<char>(codepoint);
+    output.push_back(static_cast<char>(codepoint));
   } else if (codepoint <= 0x7FF) {
-    output[written++] = static_cast<char>(0xC0 | (codepoint >> 6));
-    output[written++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+    output.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
   } else if (codepoint <= 0xFFFF) {
-    output[written++] = static_cast<char>(0xE0 | (codepoint >> 12));
-    output[written++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-    output[written++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+    output.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
   } else {
-    output[written++] = static_cast<char>(0xF0 | (codepoint >> 18));
-    output[written++] = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-    output[written++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-    output[written++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+    output.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
   }
 }
 
-bool appendNumericEntity(std::string& output, size_t& written, const char* entity, size_t len) {
+bool appendNumericEntity(std::string& output, const char* entity, size_t len) {
   if (len < 4 || entity[0] != '&' || entity[1] != '#' || entity[len - 1] != ';') return false;
   size_t pos = 2;
   uint32_t base = 10;
@@ -96,42 +87,36 @@ bool appendNumericEntity(std::string& output, size_t& written, const char* entit
     if (value > (0x10FFFF - digit) / base) return false;
     value = value * base + digit;
   }
-  appendCodepoint(output, written, value);
+  appendCodepoint(output, value);
   return true;
 }
 
-void appendBreak(std::string& output, size_t& written, size_t count = 1) {
-  while (written > 0 && output[written - 1] == ' ') written--;
-  if (written == 0) return;
+void appendBreak(std::string& output, size_t count = 1) {
+  while (!output.empty() && output.back() == ' ') output.pop_back();
+  if (output.empty()) return;
   size_t existing = 0;
-  while (existing < written && output[written - existing - 1] == '\n') existing++;
-  while (existing++ < count) output[written++] = '\n';
+  while (existing < output.size() && output[output.size() - existing - 1] == '\n') existing++;
+  while (existing++ < count) output.push_back('\n');
 }
 
 }  // namespace
 
-std::string htmlToPlainText(std::string html, const char headingMarker) {
-  // Compact into consumed input bytes; replacements never expand the source.
-  size_t written = 0;
+std::string htmlToPlainText(const std::string& html) {
+  std::string output;
+  output.reserve(html.size());
 
   for (size_t i = 0; i < html.size();) {
     if (html[i] == '<' && isTagStart(html, i)) {
       const size_t close = html.find('>', i + 1);
       if (close == std::string::npos) {
-        html[written++] = html[i++];
+        output.push_back(html[i++]);
         continue;
       }
       const TagBreak separator = tagBreak(html, i + 1, close);
-      if (separator == TagBreak::Line) {
-        appendBreak(html, written);
-      } else if (separator == TagBreak::Paragraph) {
-        appendBreak(html, written, 2);
-      } else if (separator == TagBreak::HeadingOpen) {
-        appendBreak(html, written);
-        html[written++] = headingMarker;
-      } else if (separator == TagBreak::HeadingClose) {
-        appendBreak(html, written);
-      }
+      if (separator == TagBreak::Line)
+        appendBreak(output);
+      else if (separator == TagBreak::Paragraph)
+        appendBreak(output, 2);
       i = close + 1;
       continue;
     }
@@ -141,14 +126,12 @@ std::string htmlToPlainText(std::string html, const char headingMarker) {
       if (semicolon != std::string::npos && semicolon - i <= 16) {
         const size_t len = semicolon - i + 1;
         const char* value = lookupHtmlEntity(html.data() + i, len);
-        const size_t valueLen = value ? strlen(value) : 0;
-        if (value != nullptr && valueLen <= len) {
-          memcpy(html.data() + written, value, valueLen);
-          written += valueLen;
+        if (value != nullptr) {
+          output.append(value);
           i = semicolon + 1;
           continue;
         }
-        if (appendNumericEntity(html, written, html.data() + i, len)) {
+        if (appendNumericEntity(output, html.data() + i, len)) {
           i = semicolon + 1;
           continue;
         }
@@ -157,15 +140,14 @@ std::string htmlToPlainText(std::string html, const char headingMarker) {
 
     const unsigned char c = html[i++];
     if (c == '\r' || c == '\t') {
-      if (written > 0 && html[written - 1] != ' ' && html[written - 1] != '\n') html[written++] = ' ';
+      if (!output.empty() && output.back() != ' ' && output.back() != '\n') output.push_back(' ');
     } else if (c == '\n') {
-      appendBreak(html, written);
+      appendBreak(output);
     } else {
-      html[written++] = static_cast<char>(c);
+      output.push_back(static_cast<char>(c));
     }
   }
 
-  while (written > 0 && (html[written - 1] == ' ' || html[written - 1] == '\n')) written--;
-  html.resize(written);
-  return html;
+  while (!output.empty() && (output.back() == ' ' || output.back() == '\n')) output.pop_back();
+  return output;
 }

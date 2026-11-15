@@ -2,7 +2,10 @@
 #include <BoardConfig.h>
 #include <FreeInkUIGfxRenderer.h>
 
+#include "../../lib/GfxRenderer/ChromeRegion.h"
+#include "../apps_local/ui/LightUi.h"
 #include "UITheme.h"
+#include "UiControlChrome.h"
 
 // Merges the active UITheme's shape (row gaps, radii, insets, selection
 // style) with the uiScale-derived sizes into FreeInkUI theme tokens: the
@@ -14,6 +17,10 @@ inline freeink::ui::ThemeTokens uiThemeTokens(const freeink::ui::GfxRendererTarg
   const ThemeMetrics& metrics = UITheme::getInstance().getMetrics();
 
   fui::ThemeTokens tokens = fui::themeTokensForLineHeight(target.lineHeight(fui::GfxRendererTarget::FONT_BODY));
+  // The outlined button, in UiControlChrome.h so host tests bind to the real
+  // thing rather than to a copy of it. See the comment there for why the core
+  // theme needs one at all.
+  tokens.button = uiButtonStyles();
   // Button-device lists retain the theme's preferred density. The SDK still
   // grows individual rows for wrapping, subtitles and icons.
   if (!BoardConfig::hasTouch()) tokens.listMinRowHeight = static_cast<int16_t>(metrics.listRowHeight);
@@ -29,7 +36,9 @@ inline freeink::ui::ThemeTokens uiThemeTokens(const freeink::ui::GfxRendererTarg
   // viewable insets into the fui safe area, and every list band derives from
   // safeRect()). Adding the same inset here doubled the compensation and
   // floated the track a full bezel-width inside the visible edge.
-  tokens.listScrollInset = 0;
+  // fork-local: 6, not 0. At 0 the track hugged the glass's right edge (3px
+  // from it in Library); it sits inside the rows' own side margin either way.
+  tokens.listScrollInset = 6;
   // Screen::header()/status() band height. Without this the SDK's
   // line-height-derived default applies and fui-drawn headers (OPDS) come out
   // a different height than every GUI.drawHeader band.
@@ -43,5 +52,11 @@ inline freeink::ui::ThemeTokens uiThemeTokens(const freeink::ui::GfxRendererTarg
   tokens.sheetRadius = static_cast<uint8_t>(metrics.sheetRadius);
   tokens.capsuleRadius = static_cast<uint8_t>(metrics.capsuleRadius);
   tokens.bodyText.bold = metrics.listTitleBold;
+  if (chrome::lightHeader) {
+    tokens.bodyText.bold = tokens.smallText.bold = tokens.titleText.bold = false;
+    tokens.headerUnderline = 0;
+    tokens.listRow = lightui::controlStyles(true);
+    tokens.button = lightui::controlStyles();
+  }
   return tokens;
 }

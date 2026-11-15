@@ -8,6 +8,9 @@
 #include <Xtc.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <functional>
 
 namespace {
 uint32_t readLe32(const uint8_t* p) {
@@ -15,7 +18,7 @@ uint32_t readLe32(const uint8_t* p) {
 }
 }  // namespace
 
-int loadBookProgress(const std::string& path) {
+static int loadBookProgressUncached(const std::string& path) {
   uint8_t data[10]{};
   if (FsHelpers::hasReflowableBookExtension(path)) {
     // Metadata objects exceed the stack budget; only the featured book is loaded, once per entry.
@@ -54,4 +57,61 @@ int loadBookProgress(const std::string& path) {
     return xtc->calculateProgress(page);
   }
   return -1;
+}
+
+int loadBookProgress(const std::string& path) {
+  // One bounded result survives Home recreation; no parser or book data stays resident.
+  static struct {
+    char path[512]{};
+    uint8_t progress[10]{};
+    uint64_t sourceBytes = 0, metadataBytes = 0;
+    uint32_t sourceModified = 0, metadataModified = 0;
+    int progressBytes = 0, percent = -1;
+  } cached;
+  const bool epub = FsHelpers::hasReflowableBookExtension(path);
+  if ((!epub && !FsHelpers::hasXtcExtension(path)) || path.size() >= sizeof(cached.path))
+    return loadBookProgressUncached(path);
+  char filePath[96];
+  const auto hash = static_cast<unsigned long>(std::hash<std::string>{}(path));
+  std::snprintf(filePath, sizeof(filePath), "/.crosspoint/%s_%lu/progress.bin", epub ? "epub" : "xtc", hash);
+  uint8_t progress[10]{};
+  int length = 0;
+  uint64_t sourceBytes = 0, metadataBytes = 0;
+  uint32_t sourceModified = 0, metadataModified = 0;
+  {
+    HalFile file;
+    if (!Storage.openFileForRead("HOME", filePath, file)) return -1;
+    length = file.read(progress, sizeof(progress));
+    if (length != 4 && length != 6 && length != 10) return -1;
+  }
+  {
+    HalFile file;
+    if (!Storage.openFileForRead("HOME", path, file)) return -1;
+    sourceBytes = file.fileSize64();
+    sourceModified = file.modificationTime();
+  }
+  if (epub) {
+    std::snprintf(filePath, sizeof(filePath), "/.crosspoint/epub_%lu/book.bin", hash);
+    HalFile file;
+    if (!Storage.openFileForRead("HOME", filePath, file)) return -1;
+    metadataBytes = file.fileSize64();
+    metadataModified = file.modificationTime();
+  }
+  if (cached.percent >= 0 && !std::strcmp(cached.path, path.c_str()) && cached.progressBytes == length &&
+      !std::memcmp(cached.progress, progress, sizeof(progress)) && cached.sourceBytes == sourceBytes &&
+      cached.sourceModified == sourceModified && cached.metadataBytes == metadataBytes &&
+      cached.metadataModified == metadataModified)
+    return cached.percent;
+  const int percent = loadBookProgressUncached(path);
+  if (percent >= 0) {
+    std::strcpy(cached.path, path.c_str());
+    std::memcpy(cached.progress, progress, sizeof(progress));
+    cached.progressBytes = length;
+    cached.sourceBytes = sourceBytes;
+    cached.sourceModified = sourceModified;
+    cached.metadataBytes = metadataBytes;
+    cached.metadataModified = metadataModified;
+    cached.percent = percent;
+  }
+  return percent;
 }

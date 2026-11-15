@@ -8,6 +8,13 @@ namespace {
 // Default sync server URL. crosspoint-sync speaks the full KOSync protocol, so
 // pointing at any other kosync server (e.g. https://sync.koreader.rocks:443)
 // still works via the custom server URL setting.
+//
+// FORK NOTE: this is upstream's server, running on upstream's infrastructure,
+// and CrossPlay inherits it so that flashing this over CrossPoint does not
+// silently orphan someone's existing sync. It is left alone rather than
+// repointed for that reason, but it means reading positions leave this device
+// for a host neither the user nor upstream chose on our behalf, so the site and
+// the README say so out loud rather than leaving it to be discovered here.
 constexpr char DEFAULT_SERVER_URL[] = "https://sync.crosspointreader.com";
 
 // Default before config version 2. Configs saved without a version stamp and an
@@ -28,12 +35,6 @@ void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
   doc["sendMetadata"] = getSendMetadata();
   doc["syncClippings"] = getSyncClippings();
   doc["syncBehavior"] = static_cast<uint8_t>(getSyncBehavior());
-  JsonArray headers = doc["headers"].to<JsonArray>();
-  for (const auto& header : customHeaders) {
-    JsonObject headerObj = headers.add<JsonObject>();
-    headerObj["name"] = header.name;
-    headerObj["value_obf"] = obfuscation::obfuscateToBase64(header.value);
-  }
 }
 
 bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
@@ -85,14 +86,6 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
   }
   setSendMetadata(doc["sendMetadata"] | false);
   setSyncClippings(doc["syncClippings"] | false);
-
-  size_t headerIndex = 0;
-  for (JsonObjectConst headerObj : doc["headers"].as<JsonArrayConst>()) {
-    if (headerIndex >= MAX_CUSTOM_HEADERS) break;
-    customHeaders[headerIndex].name = headerObj["name"] | "";
-    customHeaders[headerIndex].value = obfuscation::deobfuscateFromBase64(headerObj["value_obf"] | "");
-    headerIndex++;
-  }
 
   const JsonVariantConst behaviorValue = doc["syncBehavior"];
   const bool missingBehavior = behaviorValue.isNull();
@@ -191,11 +184,4 @@ void KOReaderCredentialStore::setSyncBehavior(KOReaderSyncBehavior behavior) {
   }
   syncBehavior = behavior;
   LOG_DBG("KRS", "Set sync behavior: %s", behavior == KOReaderSyncBehavior::SMART ? "Smart" : "Ask");
-}
-
-void KOReaderCredentialStore::setCustomHeader(size_t index, const std::string& name, const std::string& value) {
-  if (index >= MAX_CUSTOM_HEADERS) return;
-  customHeaders[index].name = name;
-  customHeaders[index].value = value;
-  LOG_DBG("KRS", "Set custom header %zu: %s", index, name.empty() ? "(cleared)" : name.c_str());
 }

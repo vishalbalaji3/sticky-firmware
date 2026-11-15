@@ -2,9 +2,17 @@
 #include <functional>
 #include <vector>
 
+#include "../../apps_local/home/HomeDashboardUi.h"
+#include "../../apps_local/home/HomeMenuInput.h"
+#include "../../apps_local/home/HomeMenuIntegration.h"
 #include "./FileBrowserActivity.h"
+#include "CrossPointSettings.h"
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
+// Not a forward declaration: the std::vector<RecentBook> member below needs
+// the complete type wherever this header's implicit destructor instantiates,
+// and the host simulator build (libc++) instantiates it in every including TU.
+#include "RecentBooksStore.h"
 #include "components/CoverGridHomeUi.h"
 #include "util/ButtonNavigator.h"
 
@@ -12,24 +20,31 @@ struct Rect;
 
 class HomeActivity final : public Activity {
   std::unique_ptr<CoverGridHomeUi> coverGridUi;
-  ButtonNavigator buttonNavigator;
+  ButtonNavigator buttonNavigator{140, 400};
+  homeui::MenuInput menuInput;
+  HomeDashboardUi dashboard;
   int selectorIndex = 0;
+  int recentBookIndex = 0;
+  int recentBookCount = 0;
+  int shelfPage = 0, shelfPages = 1, shelfPageSize = 0;
+  int recentSourceIndices[RecentBooksStore::MAX_RECENT_BOOKS]{};
+  int displayBookCount() const {
+    return coverGridUi ? static_cast<int>(recentBooks.size()) : recentBooks.empty() ? 0 : 1;
+  }
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
+  bool dashboardDirty = true;
+  uint32_t lastHomePaint = 0;
   bool hasOpdsServers = false;
   bool hasPlugins = false;
-  // The home "library" slot (index 2) shows Plugins when any plugin is
-  // installed, otherwise OPDS. The index converters gate on its presence.
-  bool hasLibrarySlot() const { return hasPlugins; }  // OPDS lives behind Library
+  // The optional services row opens installed Plugins, otherwise configured OPDS.
+  bool hasLibrarySlot() const { return hasPlugins || hasOpdsServers; }
   bool hasContinueReading = false;
-  bool coverRendered = false;      // Track if cover has been rendered once
-  bool coverBufferStored = false;  // Track if cover buffer is stored
-  uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
-  size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
-  // Logical rect last passed to drawRecentBookCover. The cover snapshot only
-  // needs to cover this region, not the entire framebuffer, so we cache the
-  // tile instead of all 48 KB. Set in render() before the call.
+  bool coverBufferStored = false;          // Track if cover buffer is stored
+  std::unique_ptr<uint8_t[]> coverBuffer;  // HomeActivity's own buffer for cover image
+  size_t coverBufferSize = 0;              // Bytes allocated to coverBuffer
+  // Cover art is reused on full redraws; focus updates repaint only menu rows.
   int coverRectX = 0;
   int coverRectY = 0;
   int coverRectW = 0;
@@ -40,32 +55,30 @@ class HomeActivity final : public Activity {
 
   // Convert HomeMenuItem to menu index (used in onEnter)
   static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
-    int i = 0;
-    if (item == HomeMenuItem::LIBRARY) return i;
-    ++i;
-    if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
-    if (hasOpdsUrl) ++i;
-    if (item == HomeMenuItem::NOTES) return i;
-    ++i;
-    if (item == HomeMenuItem::JAPANESE) return i;
-    ++i;
-    if (item == HomeMenuItem::SETTINGS_MENU) return i;
-    return 0;
+    if (SETTINGS.homeLayout == CrossPointSettings::HOME_BOOX) {
+      for (int n = 0; n < homeui::kPiccoActions; ++n)
+        if (indexToMenuItem(n, hasOpdsUrl) == item) return n;
+      return 0;
+    }
+    const int index = homemenu::indexOf(homemenu::config(), homemenu::idFor(item), hasOpdsUrl);
+    return index < 0 ? 0 : index;
   }
 
   // Convert menu index to HomeMenuItem (used in loop)
   static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
-    int i = 0;
-    if (idx == i++) return HomeMenuItem::LIBRARY;
-    if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
-    if (idx == i++) return HomeMenuItem::NOTES;
-    if (idx == i++) return HomeMenuItem::JAPANESE;
-    if (idx == i) return HomeMenuItem::SETTINGS_MENU;
-    return HomeMenuItem::NONE;
+    if (SETTINGS.homeLayout == CrossPointSettings::HOME_BOOX) {
+      static constexpr HomeMenuItem actions[] = {
+          HomeMenuItem::FILE_BROWSER, HomeMenuItem::LIBRARY, HomeMenuItem::FILE_TRANSFER, HomeMenuItem::READING_STATS,
+          HomeMenuItem::APPS,         HomeMenuItem::GAMES,   HomeMenuItem::SETTINGS_MENU};
+      return idx >= 0 && idx < homeui::kPiccoActions ? actions[idx] : HomeMenuItem::NONE;
+    }
+    return homemenu::item(homemenu::at(homemenu::config(), idx, hasOpdsUrl));
   }
-  void onRecentBookSelected(const std::string& path);
+  void onSelectBook(const std::string& path);
+  void onFileBrowserOpen();
   void onLibraryOpen();
   void onSettingsOpen();
+  void onFileTransferOpen();
   void onOpdsBrowserOpen();
   void onPluginsOpen();
 
@@ -74,8 +87,9 @@ class HomeActivity final : public Activity {
   bool restoreCoverBuffer();  // Restore frame buffer from stored cover
   void freeCoverBuffer();     // Free the stored cover buffer
   void loadRecentBooks(int maxBooks);
-  void loadRecentCovers(int coverHeight);
+  bool loadRecentCovers(int coverHeight);
   void fillCoverGridFromLibrary();
+  void loadShelfPage();
   void resolveGridCoverPaths();
   void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);
 
@@ -83,11 +97,15 @@ class HomeActivity final : public Activity {
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                         HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool cleanInitialRefresh = false)
       : Activity("Home", renderer, mappedInput),
+        dashboard(renderer),
         initialMenuItem(initialMenuItemValue),
-        cleanInitialRefresh(cleanInitialRefresh) {}
+        cleanInitialRefresh(cleanInitialRefresh) {
+    setInterfaceFontSection(menufont::Section::Home);
+  }
   void onEnter() override;
   void onExit() override;
   void loop() override;
+  std::optional<uint32_t> nextLoopWakeDelayMs(uint32_t) const override { return 1000; }
   void render(RenderLock&&) override;
   bool isHomeActivity() const override { return true; }
 };

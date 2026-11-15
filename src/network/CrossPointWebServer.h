@@ -2,11 +2,11 @@
 
 #include <ArduinoJson.h>
 #include <HalStorage.h>
+#include <NetworkUdp.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 
 #include <memory>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -38,9 +38,6 @@ class CrossPointWebServer {
     size_t size = 0;
     bool success = false;
     String error = "";
-    // Overwriting an existing file: data goes to "<file>.part", which replaces
-    // the file only after the whole upload is written.
-    bool staged = false;
 
     // Upload write buffer - batches small writes into larger SD card operations
     // 4KB is a good balance: large enough to reduce syscall overhead, small enough
@@ -50,7 +47,54 @@ class CrossPointWebServer {
     size_t bufferPos = 0;
   } upload;
 
-  CrossPointWebServer();
+  // WHICH SURFACE this server exposes. Three, not a boolean, because the reason
+  // the old flag existed applies again with a different answer.
+  //
+  // The reader's web UI is unauthenticated by design -- a deliberate, temporary
+  // thing you open from a screen and close again. DeveloperOnly exists because
+  // dev mode keeps its server up for as long as the toggle is on, and serving
+  // the file manager persistently would quietly turn "I left dev mode on" into
+  // "anyone on this network can browse my card".
+  //
+  // WallpapersOnly exists for the same reason one step further: the Wallpapers
+  // app puts an address in a QR CODE and invites you to scan it, which is the
+  // opposite of deliberate-and-temporary. Reusing Full there would have meant
+  // /files, /download, /delete, /api/settings, /api/wifi (the saved network
+  // list) and WebDAV over the whole card, all reachable from a code printed on
+  // a screen. It serves one page and takes one upload.
+  enum class Surface : uint8_t {
+    Full,            // the reader's web UI: file manager, settings, WebDAV, WebSocket
+    DeveloperOnly,   // /api/dev/* and nothing else
+    WallpapersOnly,  // GET /w, its script, and PUT /w/upload. No dev routes either.
+    // NotesOnly exists for the same reason one step further again: the Notes
+    // app puts an address in a QR code and invites a phone to scan it, and what
+    // is behind that code is ONE note -- the one the reader has open -- not the
+    // card. It serves one page and reads and writes one file, whose path the
+    // app sets before begin() and the client can never name. There is nothing
+    // to validate because nothing is accepted.
+    NotesOnly,
+  };
+
+  explicit CrossPointWebServer(Surface surface = Surface::Full);
+
+  // The one file the NotesOnly surface reads and writes, and the name to show
+  // on the page. Set before begin(); the client never names either, which
+  // deletes the traversal question rather than answering it.
+  // `isList` is the KIND, from the reader, which is the only side that knows it
+  // for an empty note: a note made with + NOTE and a list made with + LIST are
+  // both an empty file until their first line.
+  void setNotesFile(const std::string& path, const std::string& displayName, const bool isList) {
+    notesPath = path;
+    notesName = displayName;
+    notesIsList = isList;
+  }
+  // True once a client has saved, so the app knows to re-read the file rather
+  // than polling the card. Cleared by the reader of it.
+  bool takeNotesChanged() {
+    const bool changed = notesChanged;
+    notesChanged = false;
+    return changed;
+  }
   ~CrossPointWebServer();
 
   // Start the web server (call after WiFi is connected)
@@ -78,13 +122,33 @@ class CrossPointWebServer {
   std::unique_ptr<WebServer> server = nullptr;
   std::unique_ptr<WebSocketsServer> wsServer = nullptr;
   bool running = false;
+  const Surface surface = Surface::Full;
+  std::string notesPath;
+  std::string notesName;
+  bool notesIsList = true;
+  bool notesChanged = false;
+  bool isFull() const { return surface == Surface::Full; }
+  bool isDev() const { return surface == Surface::DeveloperOnly; }
+  bool isWallpapers() const { return surface == Surface::WallpapersOnly; }
+  bool isNotes() const { return surface == Surface::NotesOnly; }
+
+  // The wallpaper upload, streamed straight to the card. Separate from
+  // UploadState because it shares nothing with the multipart path: no
+  // filename from the client, no directory from a query string.
+  struct WallUpload {
+    HalFile file;
+    std::string target;  // the .part being written
+    std::string final;   // where it is renamed on success
+    size_t written = 0;
+    bool accepted = false;  // the precondition passed and the file opened
+    bool ok = false;        // the body arrived complete and the rename worked
+    const char* refusal = nullptr;
+  } wallUpload;
   bool apMode = false;  // true when running in AP mode, false for STA mode
   uint16_t port = 80;
-  uint16_t wsPort = 81;      // WebSocket port
-  int discoverySocket = -1;  // UDP discovery, -1 when closed
-  void openDiscoverySocket();
-  void closeDiscoverySocket();
-  void answerDiscovery() const;
+  uint16_t wsPort = 81;  // WebSocket port
+  NetworkUDP udp;
+  bool udpActive = false;
   std::function<bool()> uploadCancelCheck;
   bool dropUploadIfCancelled() const;
 
@@ -97,9 +161,6 @@ class CrossPointWebServer {
   void scanFiles(const char* path, const std::function<void(FileInfo)>& callback) const;
   String formatFileSize(size_t bytes) const;
   bool isEpubFile(const String& filename) const;
-
-  // Dispatches every route from one table, defined in the .cpp file.
-  class RouteHandler;
 
   // Request handlers
   void handleRoot() const;
@@ -152,6 +213,48 @@ class CrossPointWebServer {
   void handlePostOpdsServer();
   void handleDeleteOpdsServer();
 
+  // Developer Mode endpoints. Present in every build, refused unless the
+  // setting is on AND the caller carries a token from a successful pair.
+  void handleDevPair();
+
+  // The Wallpapers surface.
+  void handleWallpaperPage() const;
+  void handleNotesPage() const;
+  void handleNotesText();
+  void handleNotesSave();
+  void handleWallpaperScript() const;
+  void handleWallpaperUpload();      // the reply, after the body
+  void handleWallpaperUploadData();  // the raw body, streamed
+  void handleDevFlash();
+  void handleDevUpload();      // POST completion
+  void handleDevUploadData();  // streaming body
+  void handleDevDisable();
+  void handleDevCrash();
+  void handleDevLog();
+#if CROSSPOINT_DEV_SERIAL_BRIDGE
+  void handleDevInput();
+  void handleDevScreen();
+  void handleDevSerial();
+#endif
+  struct DevUploadState {
+    HalFile file;
+    size_t written = 0;
+    bool ok = false;
+    bool authorised = false;  // decided at UPLOAD_FILE_START, answered at the end
+  } devUpload;
+  // Shared gate for every /api/dev/ route except pairing. Sends the refusal
+  // itself and returns false, so each handler is one line of guard.
+  // True for settings that must never be writable over the network, whatever
+  // the surface. See the definition for why devMode is one.
+  static bool isLocalOnlySetting(const char* key);
+  bool devAuthorised();
+  // Same test as devAuthorised() but SILENT. The upload data callback runs
+  // while the request body is still being parsed, and calling server->send()
+  // there corrupts the server and reboots the device -- a remote reset any
+  // unpaired caller could trigger. So the callback decides with this and the
+  // completion handler is the only thing that answers.
+  bool devTokenOk() const;
+
   // Wi-Fi credential handlers
   void handleGetWifiNetworks() const;
   void handlePostWifiNetwork();
@@ -160,7 +263,6 @@ class CrossPointWebServer {
   // Missing or malformed JSON sends a 400 response and returns false.
   bool readJsonBody(JsonDocument& out) const;
   void sendJson(const JsonDocument& doc) const;
-  bool rejectIfPluginsDisabled() const;
   void handlePluginList() const;  // GET  /api/plugins   -> discovered plugins
   void handlePluginFile() const;  // GET  /plugin?name&file -> serve SD file
   void handleRelay();             // POST /api/relay     -> device makes an HTTP(S) call
@@ -183,10 +285,10 @@ class CrossPointWebServer {
 
   // SD-plugin job queue. External systems (a companion app, a script) enqueue
   // {plugin, action, args}; any open page hosting the plugin (File Manager,
-  // Plugins, or the headless /plugins-run page) claims and executes it, then
+  // Settings, or the headless /plugins-run page) claims and executes it, then
   // posts the result. The firmware only stores small JSON blobs — plugin logic
-  // never runs on-device. A fixed pool, allocated by the first job and kept for the
-  // web session: no allocation per job, oldest finished slot recycled.
+  // never runs on-device. Fixed pool inside this (heap-allocated, web-session
+  // lifetime) object: no allocation per job, oldest finished slot recycled.
   struct PluginJob {
     uint32_t id = 0;         // 0 = empty slot
     uint32_t claim = 0;      // current claim; a completion must echo it
@@ -204,13 +306,10 @@ class CrossPointWebServer {
   static constexpr uint8_t JOB_ERROR = 4;
   static constexpr size_t MAX_PLUGIN_JOBS = 6;
   static constexpr uint32_t PLUGIN_JOB_LEASE_MS = 10UL * 60 * 1000;
-  // Allocated by the first job submit: most sessions never use plugin jobs.
-  std::unique_ptr<PluginJob[]> pluginJobs;
-  std::span<PluginJob> pluginJobSlots() { return {pluginJobs.get(), pluginJobs ? MAX_PLUGIN_JOBS : 0}; }
+  PluginJob pluginJobs[MAX_PLUGIN_JOBS];
   uint32_t nextPluginJobId = 1;
   uint32_t nextPluginJobClaim = 1;
   PluginJob* allocPluginJob();
-  void handlePluginsPage() const;       // GET /plugins     -> plugin settings page
   void handlePluginRunnerPage() const;  // GET /plugins-run -> headless executor page
   void handlePluginJobSubmit();         // POST /api/plugin-jobs          -> {id}
   void handlePluginJobClaim();          // GET  /api/plugin-jobs/claim    -> next pending job for a plugin

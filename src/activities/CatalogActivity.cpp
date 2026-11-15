@@ -7,6 +7,7 @@
 #include <Memory.h>
 #include <WiFi.h>
 
+#include "DevMode.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -22,7 +23,9 @@ void CatalogActivity::onEnter() {
 
 void CatalogActivity::onExit() {
   Activity::onExit();
-  if (WiFi.getMode() != WIFI_MODE_NULL) {
+  // fork-local seam: not ours to put down if Developer Mode brought it up.
+  // This branch reboots the device, which with dev mode on reads as a crash.
+  if (WiFi.getMode() != WIFI_MODE_NULL && !devmode::holdsRadio()) {
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
@@ -63,16 +66,14 @@ void CatalogActivity::launchWifiSelection() {
   requestUpdate();
   startActivityForResult(std::move(wifi), [this](const ActivityResult& result) {
     if (result.isCancelled)
-      wifiSelectionCancelled();
+      fail(StrId::STR_WIFI_CONN_FAILED);
     else
       startBrowse();
   });
 }
 
-void CatalogActivity::wifiSelectionCancelled() { fail(StrId::STR_WIFI_CONN_FAILED); }
-
 void CatalogActivity::launchSearch() {
-  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH), searchPrefill());
+  auto keyboard = makeUniqueNoThrow<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH));
   if (!keyboard) {
     LOG_ERR("CAT", "OOM: search keyboard");
     fail(StrId::STR_MEMORY_ERROR);
@@ -172,8 +173,7 @@ void CatalogActivity::onDownloadProgress(const size_t downloaded, const size_t t
 
 HttpDownloader::DownloadError CatalogActivity::downloadFile(const std::string& url, const std::string& dest,
                                                             const std::string& user, const std::string& password,
-                                                            const std::vector<HttpDownloader::Header>& headers,
-                                                            const std::string* postBody, const char* postContentType) {
+                                                            const std::vector<HttpDownloader::Header>& headers) {
   downloadProgress = downloadTotal = 0;
   lastRenderedPercent = -1;
   lastProgressUpdateMs = 0;
@@ -186,11 +186,6 @@ HttpDownloader::DownloadError CatalogActivity::downloadFile(const std::string& u
       ESP.getMaxAllocHeap() < HttpDownloader::MIN_TLS_MAX_ALLOC) {
     LOG_ERR("CAT", "Low heap for download (%u free, %u max block)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return HttpDownloader::HTTP_ERROR;
-  }
-  if (postBody) {
-    return HttpDownloader::postToFile(
-        url, *postBody, postContentType ? postContentType : "application/octet-stream", dest,
-        [this](size_t downloaded, size_t total) { onDownloadProgress(downloaded, total); }, &cancelDownload);
   }
   return HttpDownloader::downloadToFile(
       url, dest, [this](size_t downloaded, size_t total) { onDownloadProgress(downloaded, total); }, &cancelDownload,

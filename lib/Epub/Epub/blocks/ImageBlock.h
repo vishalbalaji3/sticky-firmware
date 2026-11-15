@@ -16,6 +16,7 @@ class ImageBlock final : public Block {
   int16_t getWidth() const { return width; }
   int16_t getHeight() const { return height; }
 
+  bool imageExists() const;
   bool hasValidCache() const;
   bool needsDecode() const;
   void renderPlaceholder(GfxRenderer& renderer, int x, int y) const;
@@ -40,7 +41,7 @@ class ImageBlock final : public Block {
   bool isEmpty() override { return false; }
 
   void render(GfxRenderer& renderer, const int x, const int y);
-  bool serialize(HalFile& file);
+  bool serialize(Print& file);
   static std::unique_ptr<ImageBlock> deserialize(HalFile& file);
 
  private:

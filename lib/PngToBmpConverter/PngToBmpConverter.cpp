@@ -1,5 +1,6 @@
 #include "PngToBmpConverter.h"
 
+#include <Arduino.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <InflateStream.h>
@@ -75,9 +76,12 @@ enum PngFilter : uint8_t {
   PNG_FILTER_PAETH = 4,
 };
 
-void yieldDuringDecode(uint8_t& rowsSinceYield) {
+void yieldDuringDecode(uint8_t& rowsSinceYield, uint32_t& lastYieldMs) {
   if (++rowsSinceYield < 8) return;
   rowsSinceYield = 0;
+  const uint32_t now = millis();
+  if (now - lastYieldMs < 250) return;
+  lastYieldMs = now;
   vTaskDelay(1);
 }
 
@@ -401,7 +405,7 @@ static void convertScanlineToGray(const PngDecodeContext& ctx, uint8_t* grayRow)
 }
 
 bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpOut, int targetWidth, int targetHeight,
-                                                   bool oneBit, bool crop, bool originalThresholds) {
+                                                   bool oneBit, bool crop, bool originalThresholds, bool gray8) {
   LOG_DBG("PNG", "Converting PNG to %s BMP (target: %dx%d)", oneBit ? "1-bit" : "2-bit", targetWidth, targetHeight);
 
   // Verify PNG signature
@@ -601,7 +605,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
 
   // Write BMP header
   int bytesPerRow;
-  if (USE_8BIT_OUTPUT && !oneBit) {
+  if ((gray8 || USE_8BIT_OUTPUT) && !oneBit) {
     writeBmpHeader8bit(bmpOut, outWidth, outHeight);
     bytesPerRow = (outWidth + 3) / 4 * 4;
   } else if (oneBit) {
@@ -633,7 +637,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
 
       return false;
     }
-  } else if (!USE_8BIT_OUTPUT) {
+  } else if (!gray8 && !USE_8BIT_OUTPUT) {
     if (USE_ATKINSON) {
       atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>(outWidth, originalThresholds);
       if (!atkinsonDitherer || !atkinsonDitherer->isValid()) {
@@ -669,6 +673,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
 
   bool success = true;
   uint8_t rowsSinceYield = 0;
+  uint32_t lastYieldMs = millis();
 
   // Process each scanline
   for (uint32_t y = 0; y < height; y++) {
@@ -686,7 +691,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
       // Direct output (no scaling)
       memset(rowBuffer, 0, bytesPerRow);
 
-      if (USE_8BIT_OUTPUT && !oneBit) {
+      if ((gray8 || USE_8BIT_OUTPUT) && !oneBit) {
         for (int x = 0; x < outWidth; x++) {
           rowBuffer[x] = adjustPixel(grayRow[x]);
         }
@@ -720,7 +725,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
           fsDitherer->nextRow();
       }
       bmpOut.write(rowBuffer, bytesPerRow);
-      yieldDuringDecode(rowsSinceYield);
+      yieldDuringDecode(rowsSinceYield, lastYieldMs);
     } else {
       // Area-averaging scaling (same as JpegToBmpConverter)
       for (int outX = 0; outX < outWidth; outX++) {
@@ -751,7 +756,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
       while (srcY_fp >= nextOutY_srcStart && currentOutY < outHeight) {
         memset(rowBuffer, 0, bytesPerRow);
 
-        if (USE_8BIT_OUTPUT && !oneBit) {
+        if ((gray8 || USE_8BIT_OUTPUT) && !oneBit) {
           for (int x = 0; x < outWidth; x++) {
             const uint8_t gray = (rowCount[x] > 0) ? (rowAccum[x] / rowCount[x]) : 0;
             rowBuffer[x] = adjustPixel(gray);
@@ -789,7 +794,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
 
         bmpOut.write(rowBuffer, bytesPerRow);
         currentOutY++;
-        yieldDuringDecode(rowsSinceYield);
+        yieldDuringDecode(rowsSinceYield, lastYieldMs);
 
         nextOutY_srcStart = static_cast<uint32_t>(currentOutY + 1) * scaleY_fp;
 
@@ -832,4 +837,12 @@ bool PngToBmpConverter::pngFileToBmpStreamWithSize(HalFile& pngFile, Print& bmpO
 bool PngToBmpConverter::pngFileTo1BitBmpStreamWithSize(HalFile& pngFile, Print& bmpOut, int targetMaxWidth,
                                                        int targetMaxHeight) {
   return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true);
+}
+
+bool PngToBmpConverter::pngFileTo1BitBmpStreamFitWithin(HalFile& pngFile, Print& bmpOut, int maxWidth, int maxHeight) {
+  return pngFileToBmpStreamInternal(pngFile, bmpOut, maxWidth, maxHeight, true, false);
+}
+
+bool PngToBmpConverter::pngFileToGrayBmpStreamNative(HalFile& file, Print& out) {
+  return pngFileToBmpStreamInternal(file, out, 0, 0, false, false, false, true);
 }

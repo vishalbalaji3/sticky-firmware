@@ -10,6 +10,8 @@
 #include "HapticFeedback.h"
 #include "KeyboardLayoutSet.h"
 #include "MappedInputManager.h"
+#include "apps_local/ui/KeyboardViewport.h"
+#include "apps_local/ui/PixelMenuTheme.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -25,8 +27,8 @@ constexpr int BUTTON_KEYBOARD_HINT_GAP = 4;
 
 int keyboardGap(const ThemeMetrics& metrics) { return std::max(metrics.keyboardKeySpacing, KEYBOARD_MIN_GAP); }
 
-int keyboardKeysHeight(const ThemeMetrics& metrics, const int rows, const bool hasTouch) {
-  const int keyHeight = hasTouch ? metrics.keyboardKeyHeight : BUTTON_KEY_HEIGHT;
+int keyboardKeysHeight(const ThemeMetrics& metrics, const int rows, const bool hasTouch, bool landscape) {
+  const int keyHeight = keyboardview::keyHeight(hasTouch ? metrics.keyboardKeyHeight : BUTTON_KEY_HEIGHT, landscape);
   return rows * keyHeight + (rows > 1 ? (rows - 1) * keyboardGap(metrics) : 0) + KEYBOARD_PANEL_PADDING * 2;
 }
 
@@ -159,6 +161,7 @@ void KeyboardEntryActivity::onEnter() {
   touchRouter.holdMs = TOUCH_LONG_PRESS_MS;
   touchRouter.overrideHoldMs = TOUCH_DEL_LONG_PRESS_MS;
   interactionsReady = false;
+  revealGate.arm();
   requestUpdate();
 }
 
@@ -371,11 +374,14 @@ std::string KeyboardEntryActivity::displayTextForCurrentState() const {
     return displayText;
   }
 
-  // Keep byte offsets aligned with text, but never reveal a lone UTF-8 byte.
-  const size_t revealEnd = cursorMode ? 0 : std::min(cursorPos, text.length());
-  const size_t revealStart = utf8Prev(text, revealEnd);
+  size_t revealPos;
+  if (cursorMode) {
+    revealPos = text.length();  // no reveal in displayText; block draws actual char directly
+  } else {
+    revealPos = (text.length() > 0 && cursorPos > 0) ? cursorPos - 1 : std::string::npos;
+  }
   for (size_t i = 0; i < displayText.length(); i++) {
-    if (i < revealStart || i >= revealEnd) {
+    if (i != revealPos) {
       displayText[i] = '*';
     }
   }
@@ -442,11 +448,11 @@ bool KeyboardEntryActivity::cursorPositionFromPoint(const int x, const int y, si
   const Rect content = UITheme::getContentArea(renderer);
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int inputStartY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
-                          metrics.verticalSpacing * 4 + metrics.keyboardVerticalOffset;
+  const int inputStartY = inputFieldTop();
 
   int availableWidth = content.width;
-  if (gpio.deviceIsX3()) {
+  // Clear the side-button hint gutters, which only render on edge-button boards without touch.
+  if (gpio.hasEdgeSideButtons() && !gpio.hasTouch()) {
     availableWidth -= 2 * metrics.sideButtonHintsWidth;
   }
   const int effectiveMargin = (content.width - availableWidth * metrics.keyboardTextFieldWidthPercent / 100) / 2;
@@ -461,7 +467,9 @@ bool KeyboardEntryActivity::cursorPositionFromPoint(const int x, const int y, si
   const bool centerText = metrics.keyboardCenteredText;
   std::string displayText = displayTextForCurrentState();
 
-  int lineStartIdx = 0;
+  int lineStartIdx = inputWindowStart(displayText, maxLineWidth);
+  int lines = 0;
+  const int visibleLines = inputFieldLines();
   int lineY = inputStartY;
   int lastLineStartIdx = 0;
   int lastLineEndIdx = static_cast<int>(displayText.length());
@@ -506,7 +514,7 @@ bool KeyboardEntryActivity::cursorPositionFromPoint(const int x, const int y, si
       return true;
     }
 
-    if (lineEndIdx == static_cast<int>(displayText.length())) {
+    if (lineEndIdx == static_cast<int>(displayText.length()) || ++lines >= visibleLines) {
       break;
     }
 
@@ -532,19 +540,45 @@ fui::Rect KeyboardEntryActivity::keyboardRect() const {
   const int pageHeight = renderer.getScreenHeight();
   const int rows = currentLayout().rowCount;
   const bool hasTouch = mappedInput.hasTouch();
-  const int height = keyboardKeysHeight(metrics, rows, hasTouch);
+  const int height = keyboardKeysHeight(metrics, rows, hasTouch, renderer.getScreenWidth() > pageHeight);
   const int hintGap = hasTouch ? metrics.verticalSpacing - metrics.keyboardVerticalOffset : BUTTON_KEYBOARD_HINT_GAP;
   const int y = pageHeight - metrics.buttonHintsHeight - height - hintGap;
   return fui::Rect{static_cast<int16_t>(content.x), static_cast<int16_t>(y), static_cast<int16_t>(content.width),
                    static_cast<int16_t>(hasTouch ? pageHeight - y : height)};
 }
 
+int KeyboardEntryActivity::inputFieldTop() const {
+  if (renderer.getScreenWidth() > renderer.getScreenHeight())
+    return pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).body.y + 4;
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  return metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing * 5 + metrics.keyboardVerticalOffset;
+}
+
+int KeyboardEntryActivity::inputFieldLines() const {
+  return keyboardview::visibleLines(keyboardRect().y, inputFieldTop(), renderer.getLineHeight(UI_12_FONT_ID),
+                                    UITheme::getInstance().getMetrics().verticalSpacing + 8,
+                                    renderer.getScreenWidth() > renderer.getScreenHeight());
+}
+
+int KeyboardEntryActivity::inputWindowStart(std::string& displayText, int width) const {
+  return keyboardview::firstByte(int(displayText.length()), int(cursorPos), inputFieldLines(),
+                                 [&](int start) { return lineBreakEnd(displayText, start, width); });
+}
+
 void KeyboardEntryActivity::loop() {
   int tx = 0;
   int ty = 0;
 
+  // The keyboard is published before the panel shows it; until the first paint
+  // lands, a tap belongs to whatever screen is still on the glass. Ignore
+  // touch, not input: the branches below this one are the physical buttons and
+  // they stay live throughout. Nothing is suppressed at the InputManager level
+  // either -- suppressTouchContact() would also kill isTouchTapCandidate,
+  // isTouchHeldAt and wasSwipe, cancelling holds while the finger is down.
+  const bool revealed = revealGate.revealed();
+
   size_t touchedCursorPos = 0;
-  if (mappedInput.wasScreenTapped(tx, ty) && cursorPositionFromPoint(tx, ty, touchedCursorPos)) {
+  if (revealed && mappedInput.wasScreenTapped(tx, ty) && cursorPositionFromPoint(tx, ty, touchedCursorPos)) {
     haptic_feedback::touchAction();
     cursorPos = std::min(touchedCursorPos, text.length());
     // The masked text field maps taps per byte; snap back to a boundary so
@@ -560,7 +594,7 @@ void KeyboardEntryActivity::loop() {
     return;
   }
 
-  if (!cursorMode && interactionsReady) {
+  if (!cursorMode && interactionsReady && revealed) {
     const bool pressedDown = mappedInput.wasScreenTouchDown(tx, ty);
     int tapX = 0;
     int tapY = 0;
@@ -744,11 +778,10 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   const Rect content = UITheme::getContentArea(renderer);  // bezel-safe content bounds
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, title.c_str());
+  pixelui::drawHeader(renderer, title.c_str(), true);
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int inputStartY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
-                          metrics.verticalSpacing * 4 + metrics.keyboardVerticalOffset;
+  const int inputStartY = inputFieldTop();
   int inputHeight = 0;
 
   std::string displayText = displayTextForCurrentState();
@@ -758,7 +791,8 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   // keyboard use (matches cursorPositionFromPoint); content.x offsets them past
   // the bezel on inset panels (EEGO A4).
   int availableWidth = content.width;
-  if (gpio.deviceIsX3()) {
+  // Clear the side-button hint gutters, which only render on edge-button boards without touch.
+  if (gpio.hasEdgeSideButtons() && !gpio.hasTouch()) {
     availableWidth -= 2 * metrics.sideButtonHintsWidth;
   }
   const int effectiveMargin = (content.width - availableWidth * metrics.keyboardTextFieldWidthPercent / 100) / 2;
@@ -789,7 +823,10 @@ void KeyboardEntryActivity::render(RenderLock&&) {
     if (w > cursorCharWidth) cursorCharWidth = w;
   }
 
-  int lineStartIdx = 0;
+  int lineStartIdx = inputWindowStart(displayText, maxLineWidth);
+  const int firstVisible = lineStartIdx;
+  int lastVisible = lineStartIdx, drawnLines = 0;
+  const int visibleLines = inputFieldLines();
   int textWidth = 0;
   int cursorPixelX = textLeft;
   int cursorLineY = inputStartY;
@@ -797,6 +834,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   while (true) {
     const int lineEndIdx = lineBreakEnd(displayText, lineStartIdx, maxLineWidth);
+    lastVisible = lineEndIdx;
     const std::string lineText = displayText.substr(lineStartIdx, lineEndIdx - lineStartIdx);
     textWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, lineText.c_str(), EpdFontFamily::REGULAR);
     {
@@ -849,13 +887,23 @@ void KeyboardEntryActivity::render(RenderLock&&) {
       } else {
         renderer.drawText(UI_12_FONT_ID, lineStartX, inputStartY + inputHeight, lineText.c_str());
       }
-      if (lineEndIdx == static_cast<int>(displayText.length())) {
+      if (lineEndIdx == static_cast<int>(displayText.length()) || ++drawnLines >= visibleLines) {
         break;
       }
 
       inputHeight += lineHeight;
       lineStartIdx = lineEndIdx;
     }
+  }
+
+  if (renderer.getScreenWidth() > renderer.getScreenHeight()) {
+    const int x = content.x + 16;
+    const auto cue = [&](int y, int direction) {
+      renderer.drawLine(x - 5, y - direction * 3, x, y + direction * 3, 2, true);
+      renderer.drawLine(x, y + direction * 3, x + 5, y - direction * 3, 2, true);
+    };
+    if (firstVisible > 0) cue(inputStartY + 10, -1);
+    if (lastVisible < int(displayText.length())) cue(inputStartY + inputHeight + lineHeight - 10, 1);
   }
 
   const int fieldWidth = (inputHeight > 0) ? maxLineWidth : textWidth;
@@ -896,7 +944,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
     }
   }
 
-  if (hintVisible && cursorMode && !text.empty()) {
+  if (hintVisible && cursorMode && !text.empty() && renderer.getScreenWidth() <= renderer.getScreenHeight()) {
     const int hintLh = renderer.getLineHeight(SMALL_FONT_ID);
     const int underlineY = inputStartY + inputHeight + lineHeight + metrics.verticalSpacing;
     const int hintY = underlineY + 4;
@@ -918,7 +966,8 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   }
 
   const fui::Rect kbRect = keyboardRect();
-  const int keysHeight = keyboardKeysHeight(metrics, currentLayout().rowCount, mappedInput.hasTouch());
+  const int keysHeight = keyboardKeysHeight(metrics, currentLayout().rowCount, mappedInput.hasTouch(),
+                                            renderer.getScreenWidth() > renderer.getScreenHeight());
   const fui::Rect keysRect{kbRect.x, static_cast<int16_t>(kbRect.y + (kbRect.height - keysHeight) / 2), kbRect.width,
                            static_cast<int16_t>(keysHeight)};
 
@@ -999,8 +1048,10 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);
   props.selectedIndex = (cursorMode || mappedInput.hasTouch()) ? -1 : static_cast<int16_t>(selectedLogicalIndex());
   // The 12-column Arabic rows need the smaller font for wide isolated letters.
-  props.labelText.font = layoutId == fui::KeyboardLayoutId::ArabicAr && !symbols ? fui::GfxRendererTarget::FONT_SMALL
-                                                                                 : fui::GfxRendererTarget::FONT_BODY;
+  props.labelText.font = (renderer.getScreenWidth() > renderer.getScreenHeight() ||
+                          (layoutId == fui::KeyboardLayoutId::ArabicAr && !symbols))
+                             ? fui::GfxRendererTarget::FONT_SMALL
+                             : fui::GfxRendererTarget::FONT_BODY;
   props.altText.font = fui::GfxRendererTarget::FONT_SMALL;
   props.gap = props.rowGap = static_cast<int16_t>(keyboardGap(metrics));
   if (urlPanel) props.uniformKeyWidth = false;  // Shortcut rows stretch independently.
@@ -1012,6 +1063,10 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   fui::keyboard(frame, keysRect, props);
   interactions.publish();
   interactionsReady = true;
+  // Measures from THIS build rather than the first, so a render that rebuilds
+  // before its single paint does not open the gate early. No-op once the first
+  // paint has landed.
+  revealGate.markBuilt();
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <InputManager.h>
+#include <freertos/semphr.h>
 
 // Display SPI pins (custom pins for XteinkX4, not hardware SPI defaults)
 #define EPD_SCLK 8   // SPI Clock
@@ -41,6 +42,13 @@
 class HalGPIO {
 #if CROSSPOINT_EMULATED == 0
   InputManager inputMgr;
+#if FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_STICKY
+  StaticSemaphore_t activitySemaphoreStorage{};
+  SemaphoreHandle_t activitySemaphore = nullptr;
+  bool activityInterruptsReady = false;
+  static void IRAM_ATTR signalActivityFromIsr(void* context);
+  void attachActivityInterrupts();
+#endif
 #endif
 
   bool lastUsbConnected = false;
@@ -74,6 +82,9 @@ class HalGPIO {
 
   // Button input methods
   void update();
+  void waitForActivity(uint32_t timeoutMs);
+  void signalActivity();
+  uint32_t nextInputServiceDelayMs(uint32_t maximum) const;
   bool isPressed(uint8_t buttonIndex) const;
   bool wasPressed(uint8_t buttonIndex) const;
   bool wasAnyPressed() const;
@@ -82,17 +93,13 @@ class HalGPIO {
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
   // True when any button contact is closed right now, read straight from the
-  // hardware (ADC ladder off its idle rail, the power GPIO asserted, or the T5S3
-  // expander key, one I2C read), without going through the debounced state.
-  // Cheap enough to call every few ms.
+  // hardware (ADC ladder off its idle rail, or the power GPIO asserted), without
+  // going through the debounced state. Cheap enough to call every few ms.
   bool rawInputActive();
   bool hasTouch() const;
   // Capacitive Home key reported by the touch controller (X4 Pro). The tap
   // event fires on release and excludes a long hold.
   bool hasHomeKey() const;
-  // Two-position slide switch (Picco). Debounced position and its change edge.
-  bool hasToggleSwitch() const;
-  bool isToggleSwitchOn() const;
   bool wasHomeKeyPressed() const;
   bool wasHomeKeyTapped() const;
   bool wasHomeKeyLongPressed() const;
@@ -137,7 +144,7 @@ class HalGPIO {
   // Returns true once per edge (plug or unplug) since the last update()
   bool wasUsbStateChanged() const;
 
-  enum class WakeupReason { PowerButton, AfterFlash, AfterUSBPower, Other };
+  enum class WakeupReason { PowerButton, Timer, AfterFlash, AfterUSBPower, Other };
 
   WakeupReason getWakeupReason() const;
 

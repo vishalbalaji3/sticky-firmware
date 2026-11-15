@@ -10,15 +10,13 @@ class ConfirmationActivity : public Activity {
   // Input data
   std::string heading;
   std::string body;
-  std::string cancelLabel;
-  std::string confirmLabel;
 
   OptionPopup confirmPopup;
+  bool acknowledgeOnly;
 
  public:
   ConfirmationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& heading,
-                       const std::string& body, const std::string& cancelLabel = {},
-                       const std::string& confirmLabel = {});
+                       const std::string& body, bool acknowledgeOnly = false);
 
   void onEnter() override;
   void loop() override;

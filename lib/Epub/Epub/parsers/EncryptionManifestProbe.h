@@ -38,8 +38,7 @@ class EncryptionManifestProbe : public Print {
     if (!xmlLocalNameEquals(name, "EncryptionMethod")) return;
     for (size_t i = 0; attributes[i]; i += 2) {
       // Match the SDK's supported algorithm; it validates resource references.
-      if (xmlLocalNameEquals(attributes[i], "Algorithm") &&
-          (std::strstr(attributes[i + 1], "aes128-cbc") || std::strstr(attributes[i + 1], "aes256-cbc"))) {
+      if (xmlLocalNameEquals(attributes[i], "Algorithm") && std::strstr(attributes[i + 1], "aes128-cbc")) {
         static_cast<EncryptionManifestProbe*>(context)->aes128 = true;
       }
     }

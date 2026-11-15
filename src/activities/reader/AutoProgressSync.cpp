@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <esp_attr.h>
 
+#include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "network/SavedWifi.h"
@@ -17,22 +18,31 @@ constexpr uint32_t STATUS_MAGIC = 0x4b53594eu;  // "KSYN"
 // RTC_NOINIT survives the manual sync's silent reboot and deep sleep, not power loss.
 RTC_NOINIT_ATTR uint32_t statusMagic;
 RTC_NOINIT_ATTR Status lastStatus;
-uint32_t skipPullKey = 0;
+RTC_NOINIT_ATTR uint32_t skipPullKey;
 
 Status currentStatus() { return statusMagic == STATUS_MAGIC ? lastStatus : Status{}; }
 }  // namespace
 
 bool shouldPullOnOpen(const std::string& path) {
   const uint32_t key = bookKey(path);
-  const bool returningFromSync = skipPullKey == key;
+  const bool returningFromSync = statusMagic == STATUS_MAGIC && skipPullKey == key;
   skipPullKey = 0;
   return autosync::shouldPullOnOpen(KOREADER_STORE.hasCredentials(), currentStatus(), key, returningFromSync,
                                     trustedtime::trustedNow());
 }
 
-void skipNextPull(const std::string& path) { skipPullKey = bookKey(path); }
+void skipNextPull(const std::string& path) {
+  if (statusMagic != STATUS_MAGIC) lastStatus = {};
+  statusMagic = STATUS_MAGIC;
+  skipPullKey = bookKey(path);
+}
+
+uint64_t syncScope(const std::string& document) {
+  return readingsync::scope(KOREADER_STORE.getBaseUrl(), KOREADER_STORE.getUsername(), document);
+}
 
 void record(const std::string& path, const bool ok, const bool pushOnly) {
+  if (statusMagic != STATUS_MAGIC) skipPullKey = 0;
   const Result result = !ok ? Result::Failed : pushOnly ? Result::Pushed : Result::Ok;
   lastStatus = Status{bookKey(path), result, trustedtime::trustedNow()};
   statusMagic = STATUS_MAGIC;
@@ -108,7 +118,7 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
   bool ok = false;
   bool remoteAhead = false;  // A deliberate skip, which is not a failure.
   if (!hash.empty()) {
-    const KOReaderProgress progress =
+    KOReaderProgress progress =
         buildUploadProgress(hash, ProgressMapper::toSavedProgress(epub, position), position, epub.get(), path);
     const bool wasConnected = WiFi.status() == WL_CONNECTED;
     if (connectSavedWifi(kJoinTimeoutMs)) {
@@ -116,6 +126,24 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
       WifiPowerSaveGuard psGuard;
       KOReaderProgress remote{};
       const auto pulled = KOReaderSyncClient::getProgress(hash, remote);
+#ifdef FREEINK_DEVICE_STICKY
+      const auto state = EpubReaderUtils::loadSyncState(*epub);
+      const uint64_t scope = syncScope(hash);
+      const auto revision = pulled == KOReaderSyncClient::NOT_FOUND ? std::optional<uint64_t>{0} : remote.revision;
+      if ((pulled == KOReaderSyncClient::OK || pulled == KOReaderSyncClient::NOT_FOUND) &&
+          readingsync::reconcile(state, scope, revision) == readingsync::Decision::Upload) {
+        progress.revision = revision;
+        std::optional<uint64_t> savedRevision;
+        ok = KOReaderSyncClient::updateProgress(progress, &savedRevision) == KOReaderSyncClient::OK;
+        if (ok && savedRevision) {
+          ok = EpubReaderUtils::saveSyncState(*epub, {scope, *savedRevision, true, false});
+        } else {
+          ok = false;
+        }
+      } else {
+        LOG_DBG("KOSync", "Exit upload deferred: unsynced changes need reconciliation");
+      }
+#else
       if (shouldPushOverRemote(pulled == KOReaderSyncClient::OK || pulled == KOReaderSyncClient::NOT_FOUND,
                                pulled == KOReaderSyncClient::OK, remote.percentage, progress.percentage)) {
         ok = KOReaderSyncClient::updateProgress(progress) == KOReaderSyncClient::OK;
@@ -124,6 +152,7 @@ bool pushProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& p
         LOG_DBG("KOSync", "Exit push skipped: remote %.4f from %s, local %.4f", remote.percentage,
                 remote.device.c_str(), progress.percentage);
       }
+#endif
     }
     if (!wasConnected) stopWifi();
   }

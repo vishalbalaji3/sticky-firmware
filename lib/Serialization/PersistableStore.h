@@ -99,6 +99,14 @@ class PersistableStore : public PersistableStoreBase {
     return instance;
   }
 
+  // The static guard serializes first use, including writers and migration
+  // resaves. A missing file keeps defaults until an explicit reload or save.
+  static T& getLoadedInstance() {
+    static const bool loaded = getInstance().loadFromFile();
+    (void)loaded;
+    return getInstance();
+  }
+
   bool saveToFile() const {
     std::lock_guard<std::mutex> lock(storeMutex);
     JsonDocument doc;

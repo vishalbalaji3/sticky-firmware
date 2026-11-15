@@ -5,6 +5,8 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "apps_local/ui/PixelMenuTheme.h"
+#include "apps_local/ui/SettingsMenuStyle.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -16,6 +18,7 @@ constexpr uint8_t kRoleCount = 4;
 constexpr uint8_t kUnassigned = 0xFF;
 // Duration to show temporary error text when reassigning a button.
 constexpr unsigned long kErrorDisplayMs = 1500;
+constexpr int kFooterHelpHeight = 84;
 }  // namespace
 
 void ButtonRemapActivity::onEnter() {
@@ -23,7 +26,6 @@ void ButtonRemapActivity::onEnter() {
 
   // Start with all roles unassigned to avoid duplicate blocking.
   currentStep = 0;
-  exitAction = ExitAction::None;
   tempMapping[0] = kUnassigned;
   tempMapping[1] = kUnassigned;
   tempMapping[2] = kUnassigned;
@@ -39,15 +41,6 @@ void ButtonRemapActivity::onEnter() {
 }
 
 void ButtonRemapActivity::loop() {
-  // Remember the first side action even if another button is still held.
-  if (exitAction == ExitAction::None || exitAction == ExitAction::Save) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-      exitAction = ExitAction::Reset;
-    } else if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-      exitAction = ExitAction::Cancel;
-    }
-  }
-
   // Clear any temporary warning after its timeout.
   if (errorUntil > 0 && millis() > errorUntil) {
     errorMessage.clear();
@@ -56,33 +49,22 @@ void ButtonRemapActivity::loop() {
     return;
   }
 
-  // Finish the entire gesture before returning to Settings or changing the live mapping.
-  if (exitAction != ExitAction::None) {
-    if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
-        mappedInput.isPressed(MappedInputManager::Button::Confirm) ||
-        mappedInput.isPressed(MappedInputManager::Button::Left) ||
-        mappedInput.isPressed(MappedInputManager::Button::Right) ||
-        mappedInput.isPressed(MappedInputManager::Button::Up) ||
-        mappedInput.isPressed(MappedInputManager::Button::Down)) {
-      return;
-    }
-    switch (exitAction) {
-      case ExitAction::None:
-        return;
-      case ExitAction::Save:
-        applyTempMapping();
-        SETTINGS.saveToFile();
-        break;
-      case ExitAction::Reset:
-        SETTINGS.frontButtonBack = CrossPointSettings::FRONT_HW_BACK;
-        SETTINGS.frontButtonConfirm = CrossPointSettings::FRONT_HW_CONFIRM;
-        SETTINGS.frontButtonLeft = CrossPointSettings::FRONT_HW_LEFT;
-        SETTINGS.frontButtonRight = CrossPointSettings::FRONT_HW_RIGHT;
-        SETTINGS.saveToFile();
-        break;
-      case ExitAction::Cancel:
-        break;
-    }
+  // Side buttons:
+  // - Up: reset mapping to defaults and exit.
+  // - Down: cancel without saving.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+    // Persist default mapping immediately so the user can recover quickly.
+    SETTINGS.frontButtonBack = CrossPointSettings::FRONT_HW_BACK;
+    SETTINGS.frontButtonConfirm = CrossPointSettings::FRONT_HW_CONFIRM;
+    SETTINGS.frontButtonLeft = CrossPointSettings::FRONT_HW_LEFT;
+    SETTINGS.frontButtonRight = CrossPointSettings::FRONT_HW_RIGHT;
+    SETTINGS.saveToFile();
+    finish();
+    return;
+  }
+
+  if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+    // Exit without changing settings.
     finish();
     return;
   }
@@ -108,7 +90,11 @@ void ButtonRemapActivity::loop() {
     currentStep++;
 
     if (currentStep >= kRoleCount) {
-      exitAction = ExitAction::Save;
+      // All roles assigned; save to settings and exit.
+      applyTempMapping();
+      SETTINGS.saveToFile();
+      finish();
+      return;
     }
 
     requestUpdate();
@@ -131,27 +117,23 @@ void ButtonRemapActivity::render(RenderLock&&) {
 
   renderer.clearScreen();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_REMAP_FRONT_BUTTONS));
-  GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
+  pixelui::drawHeader(renderer, tr(STR_REMAP_FRONT_BUTTONS), I18N.getLanguage() != Language::EN);
+  GUI.drawSubHeader(renderer,
+                    Rect{0, pixelui::geometry(toybox::makeTarget(renderer).deviceContext()).header.bottom() + 4,
+                         pageWidth, metrics.tabBarHeight},
                     tr(STR_REMAP_PROMPT));
 
-  int topOffset = metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing;
+  const int helpTop = pageHeight - metrics.buttonHintsHeight - metrics.contentSidePadding - 60;
   renderUi();
 
   // Temporary warning banner for duplicates.
   if (!errorMessage.empty()) {
-    GUI.drawHelpText(renderer,
-                     Rect{0, pageHeight - metrics.buttonHintsHeight - metrics.contentSidePadding - 15, pageWidth, 20},
-                     errorMessage.c_str());
+    GUI.drawHelpText(renderer, Rect{0, helpTop - 24, pageWidth, 20}, errorMessage.c_str());
   }
 
   // Provide side button actions at the bottom of the screen (split across two lines).
-  GUI.drawHelpText(renderer,
-                   Rect{0, topOffset + 4 * metrics.listRowHeight + 4 * metrics.verticalSpacing, pageWidth, 20},
-                   tr(STR_REMAP_RESET_HINT));
-  GUI.drawHelpText(renderer,
-                   Rect{0, topOffset + 4 * metrics.listRowHeight + 5 * metrics.verticalSpacing + 20, pageWidth, 20},
-                   tr(STR_REMAP_CANCEL_HINT));
+  GUI.drawHelpText(renderer, Rect{0, helpTop, pageWidth, 24}, tr(STR_REMAP_RESET_HINT));
+  GUI.drawHelpText(renderer, Rect{0, helpTop + 28, pageWidth, 24}, tr(STR_REMAP_CANCEL_HINT));
 
   // Live preview of logical labels under front buttons.
   // This mirrors the on-device front button order: Back, Confirm, Left, Right.
@@ -167,31 +149,33 @@ void ButtonRemapActivity::screenTrampoline(UiScreen& screen, void* user) {
 }
 
 void ButtonRemapActivity::buildScreen(UiScreen& screen) {
+  pixelui::FontScope fonts(uiTarget, renderer, I18N.getLanguage() != Language::EN);
+  uiTarget.setFont(pixelui::kSmall, UI_12_FONT_ID);
+  uiTarget.setFont(4, UI_10_FONT_ID);
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const int topOffset = metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing;
   screen.setContentMarginFromScreen(
       fui::Insets{static_cast<int16_t>(safe.y + topOffset),
                   static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width) + metrics.verticalSpacing),
-                  static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) + metrics.verticalSpacing),
+                  static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) + metrics.verticalSpacing +
+                                       kFooterHelpHeight),
                   static_cast<int16_t>(safe.x + metrics.verticalSpacing)});
 
   for (uint8_t i = 0; i < kRoleCount; ++i) {
     const uint8_t assignedButton = tempMapping[i];
-    rowItems[i].value = assignedButton == kUnassigned ? tr(STR_UNASSIGNED) : getHardwareName(assignedButton);
+    rowItems[i].subtitle = assignedButton == kUnassigned ? tr(STR_UNASSIGNED) : getHardwareName(assignedButton);
   }
 
   fui::ListProps props;
   props.items = rowItems;
   props.count = kRoleCount;
-  props.selectedIndex = currentStep < kRoleCount ? currentStep : -1;
+  props.selectedIndex = currentStep;
+  props.topIndex = currentStep;
   props.inputMask = fui::InputNone;
-  props.scrollIndicator = false;
-  // Label at the value's font size: both sides of the row read as one unit.
-  // maxLines=2 also marks the style caller-owned (see textStyleUnset).
-  props.labelText = screen.theme().smallText;
-  props.labelText.maxLines = 2;
-  screen.list(props);
+  props.scrollIndicator = true;
+  settingsui::styleRows(props);
+  pixelui::list(screen, props);
 }
 
 void ButtonRemapActivity::applyTempMapping() {

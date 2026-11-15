@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <HalMemory.h>
+#include <I18n.h>
 #include <Logging.h>
 #include <SecureHttpClient.h>
 #include <base64.h>
@@ -13,8 +14,11 @@
 int KOReaderSyncClient::lastHttpCode = 0;
 
 namespace {
-// Device identifier for CrossPoint reader
-constexpr char DEVICE_NAME[] = "CrossPoint";
+#ifdef FREEINK_DEVICE_STICKY
+constexpr char DEVICE_NAME[] = "Sticky";
+#else
+constexpr char DEVICE_NAME[] = "CrossNext";
+#endif
 
 // wolfSSL uses the default allocator, which can use PSRAM on supported builds.
 // Keep a free-space floor and room for a full TLS record when the server does
@@ -32,15 +36,6 @@ void applyAuthHeaders(freeink::SecureHttpClient& http) {
   const std::string credentials = KOREADER_STORE.getUsername() + ":" + KOREADER_STORE.getPassword();
   const String encoded = base64::encode(credentials.c_str());
   http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
-}
-
-// Caller-configured headers (e.g. a Cloudflare Access service token) applied
-// on top of the KOSync auth scheme, including on createUser() which has no
-// KOSync credentials yet.
-void applyCustomHeaders(freeink::SecureHttpClient& http) {
-  for (const auto& header : KOREADER_STORE.getCustomHeaders()) {
-    if (!header.name.empty()) http.addHeader(header.name, header.value);
-  }
 }
 
 // True when free heap is too low to risk a TLS handshake.
@@ -73,7 +68,6 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
     LOG_ERR("KOSync", "Bad URL: %s", url.c_str());
     return NETWORK_ERROR;
   }
-  applyCustomHeaders(http);
   applyAuthHeaders(http);
   const int httpCode = http.GET();
   http.end();
@@ -113,7 +107,6 @@ KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
     LOG_ERR("KOSync", "Bad URL: %s", url.c_str());
     return NETWORK_ERROR;
   }
-  applyCustomHeaders(http);
   http.addHeader("Accept", "application/vnd.koreader.v1+json");
   http.addHeader("Content-Type", "application/json");
   const int httpCode = http.sendRequest("POST", body);
@@ -147,7 +140,6 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     LOG_ERR("KOSync", "Bad URL: %s", url.c_str());
     return NETWORK_ERROR;
   }
-  applyCustomHeaders(http);
   applyAuthHeaders(http);
   const int httpCode = http.GET();
   lastHttpCode = httpCode;
@@ -178,6 +170,13 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
       return JSON_ERROR;
     }
 
+    if (doc.as<JsonObjectConst>().isNull()) return JSON_ERROR;
+    if (doc.as<JsonObjectConst>().size() == 0) return NOT_FOUND;
+    if (!doc["progress"].is<const char*>() || !doc["percentage"].is<float>()) return JSON_ERROR;
+    outProgress.revision.reset();
+    if (doc["revision"].is<uint64_t>() && doc["revision"].as<uint64_t>() <= 9007199254740991ULL) {
+      outProgress.revision = doc["revision"].as<uint64_t>();
+    }
     outProgress.document = documentHash;
     outProgress.progress = doc["progress"].as<std::string>();
     outProgress.percentage = doc["percentage"].as<float>();
@@ -214,7 +213,9 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   return SERVER_ERROR;
 }
 
-KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgress& progress) {
+KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgress& progress,
+                                                             std::optional<uint64_t>* savedRevision) {
+  if (savedRevision) savedRevision->reset();
   lastHttpCode = 0;
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
@@ -257,6 +258,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   doc["percentage"] = progress.percentage;
   doc["device"] = DEVICE_NAME;
   doc["device_id"] = DEVICE_ID;
+  if (progress.revision) doc["expected_revision"] = *progress.revision;
   if (progress.position.has_value() && KOREADER_STORE.supportsRichProgress()) {
     // Enhanced position is opt-in by server type; strict KOSync never receives it.
     const auto& p = *progress.position;
@@ -281,14 +283,21 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
     LOG_ERR("KOSync", "Bad URL: %s", url.c_str());
     return NETWORK_ERROR;
   }
-  applyCustomHeaders(http);
   applyAuthHeaders(http);
   http.addHeader("Content-Type", "application/json");
   const int httpCode = http.sendRequest("PUT", body);
+  if (httpCode >= 200 && httpCode < 300 && savedRevision) {
+    JsonDocument response;
+    if (deserializeJson(response, http.getString().c_str()) == DeserializationError::Ok &&
+        response["revision"].is<uint64_t>() && response["revision"].as<uint64_t>() <= 9007199254740991ULL) {
+      *savedRevision = response["revision"].as<uint64_t>();
+    }
+  }
   http.end();
   lastHttpCode = httpCode;
 
   LOG_DBG("KOSync", "Update progress response: %d", httpCode);
+  if (httpCode == 409) return CONFLICT;
 
   if (httpCode <= 0) return NETWORK_ERROR;
   // Any 2xx accepts the progress. The reference kosync server answers 200,
@@ -302,6 +311,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
 const char* KOReaderSyncClient::errorString(Error error) {
   switch (error) {
+    case CONFLICT:
+      return tr(STR_SYNC_POSITION_CHANGED);
     case OK:
       return "Success";
     case NO_CREDENTIALS:

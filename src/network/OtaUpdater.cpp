@@ -17,12 +17,17 @@
 
 #include "FirmwareBoardTag.h"
 #include "FirmwareFlasher.h"
-
-namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/crosspoint-reader/crosspoint-reader/releases/latest";
-}  // namespace
+#include "ReleaseSources.h"
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
+  updateAvailable = false;
+  latestVersion.clear();
+  otaUrl.clear();
+  otaSize = processedSize = totalSize = 0;
+  // Sticky carries board and voice patches absent from upstream release images.
+#if FREEINK_DEVICE_STICKY
+  return NO_UPDATE;
+#endif
   LOG_DBG("OTA", "Checking for update (current: %s)", CROSSPOINT_VERSION);
 
   // Stream the ~32KB release JSON straight into the parser as it arrives.
@@ -30,59 +35,69 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   // on top of the TLS session's heap during the fetch; with -fno-exceptions an
   // OOM there aborts. fetchUrl handles the verified-https GET, redirects, and
   // User-Agent (see HttpDownloader).
-  // Heap-allocated: the parser embeds a 2 KB JSON token buffer.
-  auto releaseParserPtr = makeUniqueNoThrow<ReleaseJsonParser>();
-  if (!releaseParserPtr) {
-    LOG_ERR("OTA", "OOM: release parser");
-    return OOM_ERROR;
-  }
-  ReleaseJsonParser& releaseParser = *releaseParserPtr;
-  releaseParser.setFirmwareAssetName("");
-  // Each board updates from crosspoint-<version>-<device>.bin. The combined
-  // C3 image uses x3-x4; other asset suffixes match their firmware board tag.
-  const bool isX4 = board_tag::boardNameLen() == 2 && memcmp(board_tag::boardName(), "x4", 2) == 0;
-  char assetSuffix[20] = "-x3-x4";
-  if (!isX4) {
-    snprintf(assetSuffix, sizeof(assetSuffix), "-%.*s", static_cast<int>(board_tag::boardNameLen()),
-             board_tag::boardName());
-  }
-  char assetName[48] = {};
-  bool assetNameSet = false;
-  const bool ok = HttpDownloader::fetchUrl(latestReleaseUrl, [&](const uint8_t* data, size_t len) {
-    size_t offset = 0;
-    while (!assetNameSet && offset < len) {
-      releaseParser.feed(reinterpret_cast<const char*>(data + offset), 1);
-      offset++;
-      if (releaseParser.foundTag()) {
-        snprintf(assetName, sizeof(assetName), "crosspoint-%s%s.bin", releaseParser.getTagName(), assetSuffix);
-        releaseParser.setFirmwareAssetName(assetName);
-        assetNameSet = true;
-      }
+  //
+  // The stable OTA alias is application-only and does not change with the release tag.
+  bool fetched = false;
+  bool tagged = false;
+  bool hasFirmware = false;
+  std::string tag;
+  std::string firmwareUrl;
+  size_t firmwareSize = 0;
+  for (const char* source : release_sources::kUrls) {
+    // Heap-allocated: the parser embeds a 2 KB JSON token buffer.
+    auto parserPtr = makeUniqueNoThrow<ReleaseJsonParser>();
+    if (!parserPtr) {
+      LOG_ERR("OTA", "OOM: release parser");
+      return OOM_ERROR;
     }
-    if (offset < len) releaseParser.feed(reinterpret_cast<const char*>(data + offset), len - offset);
-    return true;
-  });
-  if (!ok) {
+    ReleaseJsonParser& parser = *parserPtr;
+    parser.setFirmwareAssetName(CROSSPOINT_RELEASE_ASSET);
+    const bool ok = HttpDownloader::fetchUrl(source, [&parser](const uint8_t* data, size_t len) {
+      parser.feed(reinterpret_cast<const char*>(data), len);
+      return true;
+    });
+    if (!ok) {
+      LOG_INF("OTA", "Release check via %s failed; next source", source);
+      continue;
+    }
+    fetched = true;
+    LOG_DBG("OTA", "Parser results from %s: tag=%s firmware=%s", source, parser.foundTag() ? "yes" : "no",
+            parser.foundFirmware() ? "yes" : "no");
+    if (!parser.foundTag()) {
+      LOG_INF("OTA", "No tag_name from %s; next source", source);
+      continue;
+    }
+    tagged = true;
+    hasFirmware = parser.foundFirmware();
+    tag = parser.getTagName();
+    firmwareUrl = parser.getFirmwareUrl();
+    firmwareSize = parser.getFirmwareSize();
+    break;
+  }
+  if (!fetched) {
     LOG_ERR("OTA", "Release check fetch failed");
     return HTTP_ERROR;
   }
-
-  LOG_DBG("OTA", "Parser results: tag=%s firmware=%s", releaseParser.foundTag() ? "yes" : "no",
-          releaseParser.foundFirmware() ? "yes" : "no");
-
-  if (!releaseParser.foundTag()) {
+  if (!tagged) {
     LOG_ERR("OTA", "No tag_name in release JSON");
     return JSON_PARSE_ERROR;
   }
-
-  if (!releaseParser.foundFirmware()) {
-    LOG_INF("OTA", "No %s asset in latest release", assetName);
+  if (!hasFirmware) {
+    LOG_INF("OTA", "No " CROSSPOINT_RELEASE_ASSET " asset in latest release");
     return NO_UPDATE;
   }
 
-  latestVersion = releaseParser.getTagName();
-  otaUrl = releaseParser.getFirmwareUrl();
-  otaSize = releaseParser.getFirmwareSize();
+  latestVersion = tag;
+  // Tags carry a v prefix ("v1.3.3"); CROSSPOINT_VERSION does not ("1.3.3").
+  // Comparing them raw meant isUpdateNewer()'s sscanf choked on the 'v' and
+  // compared uninitialized ints -- every install since v1.0.0 rode on that
+  // garbage reading as "newer", and a device already on the latest release
+  // was offered itself as an update. Found on hardware, naturally.
+  if (!latestVersion.empty() && (latestVersion[0] == 'v' || latestVersion[0] == 'V')) {
+    latestVersion.erase(0, 1);
+  }
+  otaUrl = firmwareUrl;
+  otaSize = firmwareSize;
   totalSize = otaSize;
   updateAvailable = true;
 
@@ -96,13 +111,17 @@ bool OtaUpdater::isUpdateNewer() const {
     return false;
   }
 
-  int currentMajor, currentMinor, currentPatch;
-  int latestMajor, latestMinor, latestPatch;
+  int currentMajor = 0, currentMinor = 0, currentPatch = 0;
+  int latestMajor = 0, latestMinor = 0, latestPatch = 0;
 
   const auto currentVersion = CROSSPOINT_VERSION;
 
-  // semantic version check (only match on 3 segments)
-  sscanf(latestVersion.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch);
+  // semantic version check (only match on 3 segments). A tag that does not
+  // parse as three numbers is not an update this device can reason about, so
+  // it is refused rather than compared as garbage.
+  if (sscanf(latestVersion.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch) != 3) {
+    return false;
+  }
   sscanf(currentVersion, "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch);
 
   /*
@@ -150,6 +169,19 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   if (!updatePartition) {
     LOG_ERR("OTA", "No OTA partition available");
     return INTERNAL_UPDATE_ERROR;
+  }
+
+  // A device keeps whatever partition table it was installed with: an OTA
+  // writes the app partition and otadata, never the table at 0x8000. Devices
+  // flashed before the spiffs partition was reclaimed still have 6.25MB slots
+  // while the release is built against 7.94MB ones, so an image can legitimately
+  // be too big for the device asking for it. Caught here, from the size the
+  // release already told us, rather than 6MB into a download that esp_ota_write
+  // would end with a generic write failure.
+  if (otaSize > 0 && otaSize > updatePartition->size) {
+    LOG_ERR("OTA", "image %zu > partition %zu on '%s': device needs a USB reflash to repartition", otaSize,
+            static_cast<size_t>(updatePartition->size), updatePartition->label);
+    return TOO_LARGE_ERROR;
   }
 
   esp_ota_handle_t otaHandle = 0;

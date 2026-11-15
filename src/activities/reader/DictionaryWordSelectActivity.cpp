@@ -35,7 +35,7 @@ void DictionaryWordSelectActivity::performLookup() {
   }
   if (!dictOpenAttempted) {
     dictOpenAttempted = true;
-    dictOpenOk = dict.open(SETTINGS.dictionaryName);
+    dictOpenOk = dict.open(translate ? SETTINGS.translationDictionaryName : SETTINGS.dictionaryName);
     // needsIndex() opens and validates the .qidx sidecar, so ask it once per
     // open rather than once per word: the answer only changes when we build
     // the sidecar ourselves, which is handled below.
@@ -60,14 +60,19 @@ void DictionaryWordSelectActivity::performLookup() {
   const bool found = ok && dict.lookup(lookupText.c_str(), definition, headword, &result);
 
   if (found) {
+    vocabulary::CaptureNotice notice;
+    if (captureRequested && !source) {
+      notice.attempted = true;
+      notice.status = vocabulary::Capture::Failed;
+    }
     {
       RenderLock lock;
       popup = Popup::None;
       page.reset();
     }
-    auto activity = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(headword),
-                                                                    std::move(definition), dict.definitionsAreHtml());
-    if (!activity || !activity->enableLookup(dict, std::move(lookupText))) {
+    auto activity = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+        renderer, mappedInput, std::move(headword), std::move(definition), dict.definitionsAreHtml(), notice);
+    if (!activity) {
       LOG_ERR("DICT", "OOM: definition activity");
       popup = Popup::Error;
       popupMsg = StrId::STR_DICT_LOW_MEMORY;
@@ -75,10 +80,14 @@ void DictionaryWordSelectActivity::performLookup() {
       requestUpdate();
       return;
     }
-    startActivityForResult(std::move(activity), [this](const ActivityResult& result) {
-      setResult(ActivityResult{result});
-      finish();
-    });
+    if (source) {
+      source->purpose = translate ? vocabulary::Purpose::Language : vocabulary::Purpose::Vocabulary;
+      if (!vocabulary::copy(source->surface, sizeof(source->surface), lookupText.c_str())) source->surface[0] = 0;
+      activity->offerVocabulary(std::move(source),
+                                translate ? SETTINGS.translationDictionaryName : SETTINGS.dictionaryName,
+                                sourceLanguage.c_str());
+    }
+    startActivityForResult(std::move(activity), [this](const ActivityResult&) { finish(); });
     return;
   }
   // Name the failure: a genuine miss is "Not found"; a word that WAS found but
@@ -97,7 +106,7 @@ void DictionaryWordSelectActivity::performLookup() {
         break;
       case Dictionary::IndexResult::Ok:
       default:
-        popupMsg = StrId::STR_DICT_ERROR;  // dict.open() failed, not the index
+        popupMsg = translate ? StrId::STR_WORD_TRANSLATION_SETUP : StrId::STR_WORD_DEFINITION_SETUP;
         break;
     }
   } else {
@@ -133,7 +142,9 @@ void DictionaryWordSelectActivity::loop() {
   }
   if (popup == Popup::NotFound || popup == Popup::Error) {
     if (millis() - popupTime >= POPUP_DURATION_MS) {
-      result.isCancelled = popup == Popup::Error;
+      ActivityResult res;
+      res.isCancelled = true;
+      setResult(std::move(res));
       finish();
     }
   }

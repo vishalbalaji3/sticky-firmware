@@ -9,6 +9,29 @@
 #include <algorithm>
 #include <cstring>
 
+namespace {
+
+char* appendUtf8Codepoint(char* output, const uint32_t codepoint) {
+  if (codepoint < 0x80) {
+    *output++ = static_cast<char>(codepoint);
+  } else if (codepoint < 0x800) {
+    *output++ = static_cast<char>(0xC0 | (codepoint >> 6));
+    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+  } else if (codepoint < 0x10000) {
+    *output++ = static_cast<char>(0xE0 | (codepoint >> 12));
+    *output++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+  } else {
+    *output++ = static_cast<char>(0xF0 | (codepoint >> 18));
+    *output++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+    *output++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+  }
+  return output;
+}
+
+}  // namespace
+
 FontCacheManager::FontCacheManager(const std::map<int, EpdFontFamily>& fontMap,
                                    const std::map<int, SdCardFont*>& sdCardFonts,
                                    const std::map<int, TtfEpdFont*>& ttfFonts)
@@ -16,20 +39,27 @@ FontCacheManager::FontCacheManager(const std::map<int, EpdFontFamily>& fontMap,
 
 void FontCacheManager::setFontDecompressor(FontDecompressor* d) { fontDecompressor_ = d; }
 
-void FontCacheManager::clearCache() {
+void FontCacheManager::clearCache() { clearScopeCache(ScopeCache::Transient); }
+
+void FontCacheManager::clearScopeCache(const ScopeCache cache) {
   if (fontDecompressor_) fontDecompressor_->clearCache();
   for (auto& [id, font] : sdCardFonts_) {
     font->clearCache();
   }
 #if CROSSPOINT_VECTOR_FONTS
   for (auto& [id, font] : ttfFonts_) {
-    if (font) font->clearCache();
+    if (!font) continue;
+    if (cache == ScopeCache::Reader)
+      font->discardFailedGlyphs();
+    else
+      font->clearCache();
   }
+#else
+  (void)cache;
 #endif
 }
 
 void FontCacheManager::releaseSdFontCaches() {
-  if (releaseCb_) releaseCb_(releaseCtx_);
   if (fontDecompressor_) fontDecompressor_->clearCache();
   for (auto& [id, font] : sdCardFonts_) {
     font->releaseResidentCaches();
@@ -46,17 +76,14 @@ void FontCacheManager::prewarmCache(int fontId, const char* utf8Text, uint8_t st
   // funnels through (reader endScanAndPrewarm, the settings preview, UI text),
   // so building here covers them all. accumulate=false means "this is the whole
   // glyph set for this render" → replace; accumulate=true → add incrementally.
+  // styleMask is ignored: a TTF face has no synthesized bold/italic here.
 #if CROSSPOINT_VECTOR_FONTS
   auto tit = ttfFonts_.find(fontId);
   if (tit != ttfFonts_.end() && tit->second) {
-    for (uint8_t i = 0; i < 4; ++i) {
-      if (styleMask & (1 << i)) {
-        if (accumulate) {
-          tit->second->addCoverage(utf8Text, i);
-        } else {
-          tit->second->build(utf8Text, i);
-        }
-      }
+    if (accumulate) {
+      tit->second->addCoverage(utf8Text);
+    } else {
+      tit->second->build(utf8Text);
     }
     return;
   }
@@ -138,10 +165,8 @@ void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::S
   const uint8_t group = fontSlot * 4 + resolvedStyle;
   const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text);
   while (*cursor) {
-    uint32_t codepoint = utf8NextCodepoint(&cursor);
+    const uint32_t codepoint = utf8NextCodepoint(&cursor);
     if (codepoint == 0) break;
-    // Small caps draw lowercase letters with their uppercase glyphs.
-    if (style & EpdFontFamily::SMALL_CAPS) codepoint = utf8SmallCapsUpper(codepoint);
 
     const uint32_t packed = (static_cast<uint32_t>(fontSlot) << SCAN_FONT_SHIFT) |
                             (static_cast<uint32_t>(resolvedStyle) << SCAN_STYLE_SHIFT) | codepoint;
@@ -170,9 +195,10 @@ void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::S
 
 // --- PrewarmScope implementation ---
 
-FontCacheManager::PrewarmScope::PrewarmScope(FontCacheManager& manager) : manager_(&manager) {
+FontCacheManager::PrewarmScope::PrewarmScope(FontCacheManager& manager, const ScopeCache cache)
+    : manager_(&manager), cache_(cache) {
   manager_->scanMode_ = ScanMode::Scanning;
-  manager_->clearCache();
+  manager_->clearScopeCache(cache_);
   manager_->resetStats();
   manager_->scanCodepointCount_ = 0;
   manager_->scanFontCount_ = 0;
@@ -203,14 +229,16 @@ void FontCacheManager::PrewarmScope::endScanAndPrewarm() {
     char* output = utf8Text;
     for (uint16_t i = 0; i < groupCount; i++) {
       const uint32_t codepoint = manager_->scanCodepoints_[groupStart + i] & SCAN_CODEPOINT_MASK;
-      output = utf8AppendCodepoint(output, codepoint);
+      output = appendUtf8Codepoint(output, codepoint);
     }
     *output = '\0';
 
     const uint8_t fontSlot = static_cast<uint8_t>(group) / 4;
     const uint8_t style = static_cast<uint8_t>(group) & 0x03;
     // This group is the complete glyph set for one font/style in this render.
-    manager_->prewarmCache(manager_->scanFontIds_[fontSlot], utf8Text, 1 << style, /*accumulate=*/false);
+    const int fontId = manager_->scanFontIds_[fontSlot];
+    const bool retainVector = cache_ == ScopeCache::Reader && manager_->ttfFonts_.count(fontId) != 0;
+    manager_->prewarmCache(fontId, utf8Text, 1 << style, /*accumulate=*/retainVector);
   }
 
   manager_->scanCodepointCount_ = 0;
@@ -221,13 +249,15 @@ void FontCacheManager::PrewarmScope::endScanAndPrewarm() {
 FontCacheManager::PrewarmScope::~PrewarmScope() {
   if (active_) {
     endScanAndPrewarm();  // no-op if already called
-    manager_->clearCache();
+    manager_->clearScopeCache(cache_);
   }
 }
 
 FontCacheManager::PrewarmScope::PrewarmScope(PrewarmScope&& other) noexcept
-    : manager_(other.manager_), active_(other.active_) {
+    : manager_(other.manager_), cache_(other.cache_), active_(other.active_) {
   other.active_ = false;
 }
 
-FontCacheManager::PrewarmScope FontCacheManager::createPrewarmScope() { return PrewarmScope(*this); }
+FontCacheManager::PrewarmScope FontCacheManager::createPrewarmScope(const ScopeCache cache) {
+  return PrewarmScope(*this, cache);
+}

@@ -7,12 +7,13 @@
 #include <atomic>
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
-#include "settings/SettingsSection.h"
+#include "util/MenuFontStyle.h"
 #include "util/ScreenshotInfo.h"
 
 class Activity;    // forward declaration
@@ -22,7 +23,17 @@ namespace voice {
 struct Place;
 }
 
-enum class HomeMenuItem { NONE, LIBRARY, OPDS_BROWSER, NOTES, JAPANESE, SETTINGS_MENU };
+enum class HomeMenuItem {
+  NONE,
+  FILE_BROWSER,
+  LIBRARY,
+  OPDS_BROWSER,
+  FILE_TRANSFER,
+  SETTINGS_MENU,
+  READING_STATS,
+  GAMES,
+  APPS
+};
 
 /**
  * ActivityManager
@@ -48,16 +59,22 @@ class ActivityManager {
   std::unique_ptr<Activity> currentActivity;
 
   void exitActivity(const RenderLock& lock);
+  // The only way currentActivity is assigned. Arms the release gate first --
+  // see the definition, and util/ButtonReleaseGate.h for the seam.
+  void setCurrentActivity(std::unique_ptr<Activity>&& next);
 
   // Pending activity to be launched on next loop iteration
   std::unique_ptr<Activity> pendingActivity;
-  enum class PendingAction { None, Push, Pop, Replace, ReplaceForSleep };
+  enum class PendingAction { None, Push, Pop, Replace };
   PendingAction pendingAction = PendingAction::None;
 
   // Task to render and display the activity
   TaskHandle_t renderTaskHandle = nullptr;
   static void renderTaskTrampoline(void* param);
   [[noreturn]] virtual void renderTaskLoop();
+  void reportRepaint(const char* activityName, uint32_t requestedAtMs, unsigned long repaintStartMs) const;
+  void reportStackHeadroom(const char* activityName);
+  void noteUpdateRequested();
 
   // Set by requestUpdateAndWait(); read and cleared by the render task after render completes.
   // Note: only one waiting task is supported at a time
@@ -67,8 +84,8 @@ class ActivityManager {
   // Must only be used via RenderLock
   SemaphoreHandle_t renderingMutex = nullptr;
 
-  // Whether to trigger a render after the current loop()
-  // This variable must only be set by the main loop, to avoid race conditions
+  // Deferred repaint for the end of loop(); immediate/waiting requests consume
+  // it when they notify the render task. Later requests still queue a new frame.
   std::atomic<bool> requestedUpdate{false};
 
   // Counts screen changes, so the Bluetooth page turner can tell one visit of a book from the next.
@@ -79,13 +96,55 @@ class ActivityManager {
   std::atomic<bool> recordingDotAfterPaint{false};
   void paintRecordingDot();  // Caller holds the RenderLock.
   static void drawRecordingDotInto(const GfxRenderer& target);
+  std::atomic<bool> repaintNotified{false};
+  std::atomic<Activity*> idleWorkOwner{nullptr};
+  void notifyRepaint();
+
+  // millis() at the moment a repaint was first asked for, or 0 when none is
+  // outstanding. Only the FIRST request in a burst is stamped: several
+  // requestUpdate() calls in one loop collapse into a single render, and the
+  // wait the user feels started at the first of them.
+  //
+  // Read by the render task to say how long a repaint sat queued before it
+  // began. That gap is invisible to every timer inside render(), and it is one
+  // of the two places a page turn can lose time without anything logging it --
+  // the other being the RenderLock a background task may be holding.
+  std::atomic<uint32_t> updateRequestedAtMs{0};
+
+  // Repaints slower than this get one INF line naming where the time went.
+  //
+  // A threshold rather than a line per repaint, because LOG_INF also writes the
+  // sixteen-line RTC ring that /api/dev/crash reads: an unconditional line per
+  // screen update would erase every crash tail within seconds. 400ms is above
+  // any healthy repaint on any panel in the fork (the X4 Pro's own FAST
+  // waveform is ~260ms) and well below the 4.2s of GitHub issue #7, so a
+  // device that is behaving stays silent and a device that is not explains
+  // itself on the cable, in a release build, without a rebuild.
+  static constexpr unsigned long SLOW_REPAINT_MS = 400;
+
+  // Fewest bytes ever left unused on the render task's stack, and the screen
+  // that reached it. The stack's size is set by CROSSPOINT_RENDER_TASK_STACK,
+  // which two crashes were spent arguing about without anyone measuring this.
+  std::atomic<uint32_t> worstStackFreeBytes{UINT32_MAX};
 
  public:
-  explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput);
-  ~ActivityManager();
+  explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
+      : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {
+    assert(renderingMutex != nullptr && "Failed to create rendering mutex");
+    stackActivities.reserve(10);
+  }
+  ~ActivityManager() { assert(false); /* should never be called */ };
 
   void begin();
+
+  // Fewest bytes ever free on the render task's stack, or UINT32_MAX before
+  // the first render. Size CROSSPOINT_RENDER_TASK_STACK from this rather than
+  // from an estimate; scripts_local/stack_budget.py only ever gives a lower
+  // bound on the true peak.
+  uint32_t stackFreeLowWater() const { return worstStackFreeBytes.load(); }
   void loop();
+  menufont::Section currentInterfaceFontSection() const;
+  uint8_t currentInterfaceFontItem() const;
 
   // Will replace currentActivity and drop all activities on stack
   void replaceActivity(std::unique_ptr<Activity>&& newActivity);
@@ -94,8 +153,7 @@ class ActivityManager {
   void goToFileTransfer();
   void goToJoinNetwork();  // File Transfer straight into Join Network (post heap-defrag reboot)
   void goToUsbDrive();
-  // openSection jumps straight into one group (End = the section list).
-  void goToSettings(SettingsSection openSection = SettingsSection::End);
+  void goToSettings();
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();
@@ -127,27 +185,29 @@ class ActivityManager {
   bool isReaderActivity() const;
   // The app at the bottom of the stack ("Notes", "SettingsList", ...), or "" with none.
   std::string rootActivityName() const;
-  // Bluetooth page turner (lib/BlePageTurner): the book in front, whether it has painted a page, and
-  // a page or chapter turn from a remote. False when no book in front took the turn.
-  bool isForegroundReader() const;
-  bool isRemoteReaderContext() const;
-  bool remoteClick(RemoteButton button);
-  // Home is in front and has painted a frame of its own (not one left from the screen before).
-  bool isForegroundHomeShown() const;
-  // The screen in front has finished its first paint.
   bool currentScreenPainted() const { return paintedVisit.load(std::memory_order_acquire) == screenVisit; }
   uint32_t visit() const { return screenVisit; }
-  bool remoteTurn(bool forward, bool chapter);
-  // A remote button mapped to the reader menu (true) or to a new clipping (false).
-  bool remoteShortcut(bool readerMenu);
+
+  // The name of the activity on screen, or "" when there is none. A
+  // replacement requested but not yet swapped in counts as the current one, so
+  // a caller that just asked for one reads back what it asked for. Pushed
+  // sub-screens report their own name, not the one underneath.
+  const char* currentActivityName() const;
+
   bool handleForcedRefresh();
   bool skipLoopDelay() const;
+  // Caller holds RenderLock while reading activity-owned timer state.
+  std::optional<uint32_t> nextLoopWakeDelayMs(uint32_t now) const;
   ScreenshotInfo getScreenshotInfo() const;
   void prepareForSleep();
+  void prepareForRestart();
 
   // If immediate is true, the update will be triggered immediately.
   // Otherwise, it will be deferred until the end of the current loop iteration.
   void requestUpdate(bool immediate = false);
+  // Caller holds RenderLock; switching activity or requesting a repaint cancels this work.
+  void requestIdleWork(Activity& owner);
+  bool idleWorkIsCurrent(const Activity& owner) const { return idleWorkOwner.load() == &owner; }
 
   // Trigger a render and block until it completes.
   // Must NOT be called from the render task or while holding a RenderLock.
