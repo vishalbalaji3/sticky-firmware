@@ -10,6 +10,8 @@
 #endif
 
 #include <cassert>
+#include <cstring>
+#include <string>
 
 #define SDCard SDCardManager::getInstance()
 
@@ -185,18 +187,63 @@ HalFile::~HalFile() = default;
 HalFile::HalFile(HalFile&&) = default;
 HalFile& HalFile::operator=(HalFile&&) = default;
 
+namespace {
+// SdFat skips leading spaces in every path component, so " X.epub" resolves to "X.epub": a file a computer named
+// " X.epub" can't be reached by path, and a twin "X.epub" would be hit instead. Names starting with a space are
+// looked up in their folder's listing and opened by directory index.
+// shortcut: only open, exists, remove and rmdir do this, and only for the last path component; openFileForRead/
+// Write/Append/Update, rename and replaceFile, and a leading-space folder earlier in the path, still miss such
+// names (so a WebDAV overwrite of " X" fails when "X" also exists). Extend when one of those is needed.
+bool lastNameStartsWithSpace(const char* path) {
+  const char* slash = strrchr(path, '/');
+  return slash && slash[1] == ' ';
+}
+
+// Caller holds StorageLock. found reports whether the name is in the listing, even if opening it failed.
+FsFile openByListing(const char* path, const oflag_t oflag, bool* found = nullptr) {
+  const char* slash = strrchr(path, '/');
+  const std::string parent(path, slash == path ? 1 : slash - path);
+  FsFile dir = SDCard.open(parent.c_str(), O_RDONLY);
+  if (!dir || !dir.isDirectory()) return FsFile();
+  static char name[768];  // 255 UTF-16 units as UTF-8; static is safe under StorageLock
+  for (FsFile entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+    entry.getName(name, sizeof(name));
+    if (strcmp(name, slash + 1) != 0) continue;
+    if (found) *found = true;
+    const uint32_t index = entry.dirIndex();
+    entry.close();
+    FsFile file;
+    if (!file.open(&dir, index, oflag)) return FsFile();
+    return file;
+  }
+  return FsFile();
+}
+}  // namespace
+
 HalFile HalStorage::open(const char* path, const oflag_t oflag) {
   StorageLock lock;  // ensure thread safety for the duration of this function
-  return HalFile(std::make_unique<HalFile::Impl>(SDCard.open(path, oflag)));
+  bool found = false;
+  FsFile file = lastNameStartsWithSpace(path) ? openByListing(path, oflag, &found) : FsFile();
+  // Not in the listing: fall back to SdFat, which keeps O_CREAT working but may open the space-stripped twin.
+  if (!found) file = SDCard.open(path, oflag);
+  return HalFile(std::make_unique<HalFile::Impl>(std::move(file)));
 }
 
 bool HalStorage::mkdir(const char* path, const bool pFlag) { HAL_STORAGE_WRAPPED_CALL(mkdir, path, pFlag); }
 
-bool HalStorage::exists(const char* path) { HAL_STORAGE_WRAPPED_CALL(exists, path); }
+bool HalStorage::exists(const char* path) {
+  StorageLock lock;
+  return (lastNameStartsWithSpace(path) && openByListing(path, O_RDONLY)) || SDCard.exists(path);
+}
 
 bool HalStorage::freeBytes(uint64_t& out) { HAL_STORAGE_WRAPPED_CALL(sdFreeBytes, out); }
 
-bool HalStorage::remove(const char* path) { HAL_STORAGE_WRAPPED_CALL(remove, path); }
+bool HalStorage::remove(const char* path) {
+  StorageLock lock;
+  if (!lastNameStartsWithSpace(path)) return SDCard.remove(path);
+  FsFile file = openByListing(path, O_RDWR);
+  return file && !file.isDirectory() && file.remove();
+}
 bool HalStorage::rename(const char* oldPath, const char* newPath) {
   HAL_STORAGE_WRAPPED_CALL(rename, oldPath, newPath);
 }
@@ -205,7 +252,12 @@ bool HalStorage::replaceFile(const char* tmpPath, const char* path) {
   HAL_STORAGE_WRAPPED_CALL(replaceFile, tmpPath, path);
 }
 
-bool HalStorage::rmdir(const char* path) { HAL_STORAGE_WRAPPED_CALL(rmdir, path); }
+bool HalStorage::rmdir(const char* path) {
+  StorageLock lock;
+  if (!lastNameStartsWithSpace(path)) return SDCard.rmdir(path);
+  FsFile dir = openByListing(path, O_RDONLY);
+  return dir && dir.isDirectory() && dir.rmdir();
+}
 
 bool HalStorage::openFileForRead(const char* moduleName, const char* path, HalFile& file) {
   StorageLock lock;  // ensure thread safety for the duration of this function
