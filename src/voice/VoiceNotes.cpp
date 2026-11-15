@@ -21,6 +21,8 @@ namespace {
 constexpr size_t kRingSamples = 512 * 1024;
 constexpr size_t kMicBlockSamples = 512;
 constexpr size_t kPumpMaxSamples = 8192;
+// FAT records a file's size only on flush, so a reset loses everything since the last one.
+constexpr uint32_t kFlushEveryBytes = 2 * kSampleRate * sizeof(int16_t);
 
 Microphone mic;
 SampleRing ring;
@@ -29,6 +31,7 @@ HalFile audioFile;
 std::string audioPath;
 std::string clientId;
 uint32_t dataBytes = 0;
+uint32_t flushedBytes = 0;
 bool recording = false;
 volatile bool micRunning = false;
 SemaphoreHandle_t micStopped = nullptr;
@@ -116,7 +119,7 @@ bool startRecording(const Place& place) {
     Storage.remove((std::string(kNotesDir) + "/" + clientId + ".json").c_str());
     return false;
   };
-  // The quote and place are saved before any audio, so a power cut still leaves a complete note.
+  // The quote and place are saved before any audio, so a power cut keeps the note up to the last flush.
   if (!writeMeta(clientId, place) || !Storage.openFileForWrite("VOICE", audioPath, audioFile) ||
       !writeHeader(audioFile, 0)) {
     LOG_ERR("VOICE", "Could not create the note on the card");
@@ -124,6 +127,7 @@ bool startRecording(const Place& place) {
   }
 
   dataBytes = 0;
+  flushedBytes = 0;
   ring.attach(reinterpret_cast<int16_t*>(ringBuffer.get()), kRingSamples);
   if (!mic.begin(kSampleRate)) {
     LOG_ERR("VOICE", "Microphone did not start");
@@ -159,6 +163,10 @@ void pumpRecording() {
       audioFile.seek(kWavHeaderBytes + dataBytes);
       return;
     }
+  }
+  if (dataBytes - flushedBytes >= kFlushEveryBytes) {
+    audioFile.flush();
+    flushedBytes = dataBytes;
   }
 }
 
