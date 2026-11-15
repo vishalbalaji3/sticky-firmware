@@ -59,3 +59,18 @@ Readest unconditional-upload gap remains; completed-Hardcover protection is unch
 Suggested firmware Ship section: integrate directly on `sticky-os`, push the SDK fork
 first, run host checks and Sticky/C3 builds, flash Sticky over MacBook USB, and verify
 boot/version plus reading, controls and voice capture on the physical device.
+
+### Published artifacts
+
+- Firmware implementation: `e300705b40da6db53b4ebd5be4ba019abe036f2c`. Its tree is
+  identical to the reviewed source snapshot; upstream source assets were published in
+  bounded batches through Dell because large MacBook uploads disconnected.
+- SDK: `9edea7c932306febc00e781b8ab58dbc9c8a8884`; cloud: `c63395903568d682609105cb36ea0a5bca1ea811`.
+- Final installed firmware: 7,728,096 bytes, SHA256
+  `1841768cace900271678b011ec5bedf947d6562020b1fcf916afb45089784212`.
+  USB write/hash verification succeeded; device PING reports `sticky 1.4.0-sticky.1`.
+- All 126 files from the official 1.4.0 resource pack are installed. Existing settings,
+  books and Noto Serif Japanese font survived. Apps shows AI Notes and Japanese first.
+- Production cloud deployment is Ready at
+  https://sticky-cloud-ginfgc1ou-vishalbalaji3s-projects.vercel.app and the public site
+  https://sticky-cloud.vercel.app returns HTTP 200.
