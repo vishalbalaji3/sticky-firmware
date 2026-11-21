@@ -460,10 +460,8 @@ void enterDeepSleep(bool fromTimeout = false, bool unattended = false) {
   // the game or the book they left. Everything from here to the teardown is
   // the attended sleep's business.
 #if FREEINK_DEVICE_STICKY
-  const bool isQuickResumeSleep =
-      !unattended &&
-      sleepwake::stickyScreenFor(fromTimeout, activityManager.isReaderActivity()) == sleepwake::StickyScreen::KeepFrame;
-  if (!unattended && !isQuickResumeSleep && !voice::isRecording() && WiFi.status() == WL_CONNECTED) voice::syncHome();
+  constexpr bool isQuickResumeSleep = false;  // every Sticky sleep draws a fresh screen
+  if (!unattended && !voice::isRecording() && WiFi.status() == WL_CONNECTED) voice::syncHome();
 #else
   const bool isQuickResumeSleep =
       !unattended && (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||

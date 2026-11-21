@@ -540,15 +540,8 @@ void SleepActivity::onEnter() {
 #if FREEINK_DEVICE_STICKY
   if (sleepwake::stickyScreenFor(fromTimeout, APP_STATE.lastSleepFromReader) == sleepwake::StickyScreen::Dashboard)
     return renderLockScreen();
-  // Keep the shown frame and add only the badge; main.cpp saves it as a Quick Resume frame.
-  if (BaseTheme::batterySpot.valid) {
-    renderer.setOrientation(static_cast<GfxRenderer::Orientation>(BaseTheme::batterySpot.orientation));
-  } else if (APP_STATE.lastSleepFromReader) {
-    ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
-  }
-  drawAsleepMarker(/*compact=*/true);
-  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-  return renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  display.setInverted(false);  // a night-mode page must not invert the cover
+  return renderCoverSleepScreen();
 #endif
 
   const bool renderQuickResume =
@@ -1021,6 +1014,9 @@ void SleepActivity::renderCoverSleepScreen() const {
       renderNoCoverSleepScreen = &SleepActivity::renderDefaultSleepScreen;
       break;
   }
+#if FREEINK_DEVICE_STICKY
+  renderNoCoverSleepScreen = &SleepActivity::renderLockScreen;  // a book without a cover locks to the dashboard
+#endif
 
   if (APP_STATE.openEpubPath.empty()) {
     return (this->*renderNoCoverSleepScreen)();

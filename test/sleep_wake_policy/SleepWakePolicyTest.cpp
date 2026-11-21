@@ -4,8 +4,8 @@
 
 using sleepwake::StickyScreen;
 
-TEST(SleepWakePolicy, TimeoutInABookKeepsThePageAndEverythingElseLocks) {
-  EXPECT_EQ(sleepwake::stickyScreenFor(true, true), StickyScreen::KeepFrame);
+TEST(SleepWakePolicy, TimeoutInABookShowsTheCoverAndEverythingElseLocks) {
+  EXPECT_EQ(sleepwake::stickyScreenFor(true, true), StickyScreen::Cover);
   EXPECT_EQ(sleepwake::stickyScreenFor(true, false), StickyScreen::Dashboard);  // home screen, Notes, ...
   EXPECT_EQ(sleepwake::stickyScreenFor(false, true), StickyScreen::Dashboard);  // Up + Down
   EXPECT_EQ(sleepwake::stickyScreenFor(false, false), StickyScreen::Dashboard);
