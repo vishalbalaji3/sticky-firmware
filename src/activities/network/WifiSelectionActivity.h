@@ -38,7 +38,8 @@ enum class WifiSelectionState {
   CONNECTED,          // Successfully connected
   SAVE_PROMPT,        // Asking user if they want to save the password
   CONNECTION_FAILED,  // Connection failed
-  FORGET_PROMPT       // Asking user if they want to forget the network
+  FORGET_PROMPT,      // Asking user if they want to forget the network
+  CAPTIVE_SIGNIN      // Sharing the link to a phone so it can pass the network's sign-in page
 };
 
 /**
@@ -158,6 +159,13 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   void renderConnecting(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderConnected(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderConnectionFailed(const Rect* screen, const ThemeMetrics* metrics) const;
+  void renderSignin(const Rect* screen, const ThemeMetrics* metrics) const;
+
+  // Sign-in page check runs once per join; the hotspot names live in captivesignin.
+  bool portalChecked = false;
+  bool signinStillBlocked = false;
+  const char* signinSsid = nullptr;
+  const char* signinPassword = nullptr;
 
   void startWifiScan(bool autoScan = false);
   void processWifiScanResults();

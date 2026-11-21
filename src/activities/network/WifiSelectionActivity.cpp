@@ -23,6 +23,7 @@
 #include "apps_local/ui/WifiScreens.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/CaptiveSignin.h"
 #include "util/PluginEvents.h"
 
 namespace fui = freeink::ui;
@@ -220,6 +221,8 @@ void WifiSelectionActivity::onExit() {
   // Note: We do NOT disconnect WiFi here - the parent activity
   // (CrossPointWebServerActivity) manages WiFi connection state. We just clean
   // up the scan and task.
+
+  captivesignin::stop();
 
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
 
@@ -600,6 +603,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
     snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
     connectedIP = ipStr;
     autoConnecting = false;
+    portalChecked = false;  // a fresh join gets a fresh sign-in check
 
 #if defined(ENABLE_SERIAL_LOG) && LOG_LEVEL >= 2
     uint8_t connectedBssid[6] = {};
@@ -867,6 +871,23 @@ void WifiSelectionActivity::loop() {
     return;
   }
 
+  if (state == WifiSelectionState::CAPTIVE_SIGNIN) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      // The hotspot doesn't touch the Sticky's own traffic, so check before tearing it down.
+      if (captivesignin::behindPortal()) {
+        signinStillBlocked = true;
+        requestUpdate();
+        return;
+      }
+      captivesignin::stop();
+      completeConnection();
+    } else if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      captivesignin::stop();
+      completeConnection();
+    }
+    return;
+  }
+
   // Handle connected state (should not normally be reached - connection
   // completes immediately)
   if (state == WifiSelectionState::CONNECTED) {
@@ -1069,12 +1090,24 @@ void WifiSelectionActivity::render(RenderLock&&) {
     case WifiSelectionState::CONNECTION_FAILED:
       renderConnectionFailed(&screen, &metrics);
       break;
+    case WifiSelectionState::CAPTIVE_SIGNIN:
+      renderSignin(&screen, &metrics);
+      break;
   }
 
   renderer.displayBuffer();
 }
 
 void WifiSelectionActivity::completeConnection() {
+  if (!portalChecked) {
+    portalChecked = true;
+    if (captivesignin::behindPortal() && captivesignin::start(signinSsid, signinPassword)) {
+      signinStillBlocked = false;
+      state = WifiSelectionState::CAPTIVE_SIGNIN;
+      requestUpdate();
+      return;
+    }
+  }
   if (purpose == WifiSelectionPurpose::Manage) {
     showDetails();
     return;
@@ -1549,6 +1582,30 @@ void WifiSelectionActivity::renderConnectionFailed(const Rect* screen, const The
 
   // Use centralized button hints
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+}
+
+void WifiSelectionActivity::renderSignin(const Rect* screen, const ThemeMetrics* metrics) const {
+  const int x = screen->x + metrics->contentSidePadding;
+  const int w = screen->width - metrics->contentSidePadding * 2;
+  const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
+  int y = screen->y + screen->height / 4;
+
+  UITheme::drawCenteredText(renderer, *screen, UI_12_FONT_ID, y, tr(STR_WIFI_SIGNIN_TITLE), true, EpdFontFamily::BOLD);
+  y += lineH * 2;
+  UITheme::drawCenteredWrappedText(renderer, Rect{x, y, w, lineH * 3}, UI_10_FONT_ID, tr(STR_WIFI_SIGNIN_STEP), 3);
+  y += lineH * 4;
+  const std::string net = std::string(tr(STR_NETWORK_PREFIX)) + signinSsid;
+  UITheme::drawCenteredText(renderer, *screen, UI_12_FONT_ID, y, net.c_str(), true, EpdFontFamily::BOLD);
+  y += lineH * 2;
+  const std::string pass = std::string(tr(STR_WIFI_SIGNIN_PASSWORD)) + signinPassword;
+  UITheme::drawCenteredText(renderer, *screen, UI_12_FONT_ID, y, pass.c_str(), true, EpdFontFamily::BOLD);
+  if (signinStillBlocked) {
+    y += lineH * 3;
+    UITheme::drawCenteredWrappedText(renderer, Rect{x, y, w, lineH * 2}, UI_10_FONT_ID, tr(STR_WIFI_SIGNIN_NOT_YET), 2);
+  }
+
+  const auto labels = mappedInput.mapLabels(tr(STR_WIFI_SIGNIN_SKIP), tr(STR_DONE), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
